@@ -99,9 +99,17 @@ def calibration_at(cal: "Calibration | CalibrationTimeline", t: float) -> Calibr
 
 
 def timeline_from_json(d) -> "Calibration | CalibrationTimeline":
-    """{"H": ...} for one calibration, or [{"from": seconds, "H": ...}, ...] when the camera moved."""
+    """{"H": ...} for one calibration, or [{"from": seconds, "H": ...}, ...] when the camera moved. An entry with
+    "H_far" is a two-homography calibration (futsal.nearfar), HOGEUN's calibration/out/H_cam<N>.json files included."""
     if isinstance(d, list):
-        return sorted(((float(x.get("from", 0.0)), Calibration.from_json(x)) for x in d), key=lambda p: p[0])
+        return sorted(((float(x.get("from", 0.0)), _from_json(x)) for x in d), key=lambda p: p[0])
+    return _from_json(d)
+
+
+def _from_json(d: dict) -> Calibration:
+    if "H_far" in d:                                     # Calibration.from_json would keep the near half only
+        from .nearfar import NearFarCalibration
+        return NearFarCalibration.from_json(d)
     return Calibration.from_json(d)
 
 

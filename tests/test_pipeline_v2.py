@@ -202,10 +202,11 @@ def test_v2_long_clip_is_solved_in_chained_windows():
         assert np.linalg.norm(xy[ok] - T[ok, j] - 0.5 * warp(T[ok, j]), axis=1).max() < 0.3
 
 
-def test_trackview_runs_v2_with_reid_and_caches_it(tmp_path):
+def test_trackview_runs_v2_with_reid_and_caches_it(tmp_path, monkeypatch):
     """trackview plumbing on synthetic footage (as tests/test_trackview.py): ReID per box into the .reid.npy sidecar,
     a cache key that knows about it, the v2 tracker, the video. The stand-in embedder is the bib + shorts colour
-    histogram, so this checks the wiring, not identity quality."""
+    histogram, so this checks the wiring, not identity quality. The first run tracks the embeddings as the cache holds
+    them (float16), so a rerun from the cache gives the same tracks."""
     import json
     import os
 
@@ -237,8 +238,13 @@ def test_trackview_runs_v2_with_reid_and_caches_it(tmp_path):
     factory = lambda c: detect.synthetic_detector(video.background(cams[c], court, SCALE), video.VEST_TO_TEAM)
     out_dir = str(tmp_path / "tv")
     sync = {"cam1": (0.0, 0.0), "cam2": (0.0, 0.0)}
+    tracked = []
+    build = trackview.build_tracks
+    monkeypatch.setattr(trackview, "build_tracks", lambda court, dets, *a, **kw: tracked.append(
+        {c: np.array([d.reid for d in ds]) for c, ds in dets.items()}) or build(court, dets, *a, **kw))
     res = trackview.run(paths, cals, sync, start=2.0, duration=4.0, out_dir=out_dir, detector_factory=factory,
                         court=court, embedder=embed)
+    first = open(os.path.join(out_dir, "tracks.json"), "rb").read()
     assert res["tracker"] == "v2" and calls and res["frames"] == 40 and 6 <= res["ids_over_half"] <= 14
     for cam in cams:
         cache = os.path.join(out_dir, f"det_{cam}.json")
@@ -252,6 +258,27 @@ def test_trackview_runs_v2_with_reid_and_caches_it(tmp_path):
                           detector_factory=lambda c: (_ for _ in ()).throw(AssertionError("should use cache")),
                           court=court, embedder=embed)
     assert len(calls) == n and again["tracker"] == "v2" and again["ids"] == res["ids"]
+    assert all(np.array_equal(tracked[0][c], tracked[1][c]) and tracked[0][c].dtype == np.float32 for c in cams)
+    assert all(np.array_equal(tracked[0][c], tracked[0][c].astype(np.float16)) for c in cams)
+    assert open(os.path.join(out_dir, "tracks.json"), "rb").read() == first
+    # the cache also knows the video's file size: one written before that was recorded is still used, one made from
+    # another file of the same name is not
+    for cam in cams:
+        cache = os.path.join(out_dir, f"det_{cam}.json")
+        d, meta = detect.load(cache)
+        assert meta["video_bytes"] == os.path.getsize(paths[cam])
+        meta.pop("video_bytes")
+        detect.save(d, cache, **meta)
+    trackview.run(paths, cals, sync, start=2.0, duration=4.0, out_dir=out_dir, video=False,
+                  detector_factory=lambda c: (_ for _ in ()).throw(AssertionError("should use cache")),
+                  court=court, embedder=embed)
+    cache = os.path.join(out_dir, "det_cam1.json")
+    d, meta = detect.load(cache)
+    detect.save(d, cache, **{**meta, "video_bytes": 1})
+    with pytest.raises(AssertionError, match="detects again"):
+        trackview.run(paths, cals, sync, start=2.0, duration=4.0, out_dir=out_dir, video=False,
+                      detector_factory=lambda c: (_ for _ in ()).throw(AssertionError("detects again")),
+                      court=court, embedder=embed)
 
 
 def test_alignment_is_not_extrapolated_off_the_pitch():
