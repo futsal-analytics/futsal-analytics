@@ -1,0 +1,4 @@
+- Python 3.12
+- pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+- pip install ultralytics
+- python detect_person.py (영상 경로는 코드에서 수정)
