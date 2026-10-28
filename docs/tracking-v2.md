@@ -90,15 +90,17 @@ v2와 v2gta는 YOLO26x 박스입니다. 영상: `experiments/full_match26/trackv
 짧은 구간 확인 영상 (검출부터, [tracking-check.md](tracking-check.md)):
 
 ```powershell
-python -m futsal.trackview --video cam1.mp4 cam2.mp4 --calib calib\cam1\calib.json calib\cam2\calib.json `
+python -m futsal.trackview --video cam1.mp4 cam2.mp4 `
     --offset 0 124.27 --start 600 --duration 180 --out trackview          # --ids v2gta 로 바꿔 볼 수 있음
 ```
+
+지금 이 명령은 검출에 `detection/`(YOLO26x + ByteTrack, conf 0.3), 좌표에 `calibration/`을 씁니다. 이 문서의 숫자는 우리 검출(conf 0.1)과 우리 탭 보정으로 잰 값입니다 ([README 한 번에 돌리기](../README.md#한-번에-돌리기)).
 
 경기 전체 (검출 캐시에서, GPU로 캐시를 먼저 만듦):
 
 ```powershell
 python experiments/build_cache.py --start 125 --duration 3185 --out experiments/cache_full26     # YOLO26x + ReID, 약 2시간
-python experiments/full_match.py --render                                                         # 추적 약 5~8분 + 영상 약 45분
+python experiments/full_match.py --render                                                         # 추적 약 5~8분 + 영상 약 45분 (좌표: calibration/)
 ```
 
 실험 비교(라벨 없는 지표): `python experiments/harness.py src_v2 src_pipeline`, `python experiments/metrics2.py ...`. 연구 기록은 `experiments/research_plan.md`와 `experiments/*_report.json`에 있습니다.
