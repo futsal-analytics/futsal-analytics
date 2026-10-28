@@ -234,7 +234,7 @@ def unsettled_20261008(cam: str, t: float) -> bool:
 
 def camera_20261008(video: str) -> str | None:
     """"cam1" / "cam2" when `video` is one of the 10/8 test videos (by file name, or by frame count), else None."""
-    name = os.path.basename(video)
+    name = os.path.basename(str(video).replace("\\", "/"))    # a Windows path names the file on Linux too
     cam = next((c for c, (v, _) in VIDEOS_20261008.items() if v == name), None)
     if cam is None and os.path.isfile(video):
         cap = cv2.VideoCapture(video)
