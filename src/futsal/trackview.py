@@ -86,23 +86,23 @@ def load_team_calibration(n: int, video: str | None = None, auto_moves: bool = F
     at_s = cal.team.get("t_sec")
     cam = nearfar.camera_20261008(video) if video else None
     if cam is not None and cam != f"cam{n}":          # videos given in the wrong order: cam1's calibration on cam2's video
-        raise ValueError(f"{os.path.basename(video)} 은 10/8 경기 {cam} 영상인데 cam{n} 자리에 들어왔습니다 "
+        raise ValueError(f"{nearfar.file_name(video)} 은 10/8 경기 {cam} 영상인데 cam{n} 자리에 들어왔습니다 "
                          "(--video 는 cam1 영상, cam2 영상 순서)")
     if auto_moves and video:
         return with_moves(cal, video, float(at_s or 0.0), cache_dir)
     if cam is None or at_s is None:
         if video:
-            print(f"  {os.path.basename(video)}: 기록된 카메라 움직임이 없어 촬영 내내 카메라가 그대로였다고 보고 계산합니다"
+            print(f"  {nearfar.file_name(video)}: 기록된 카메라 움직임이 없어 촬영 내내 카메라가 그대로였다고 보고 계산합니다"
                   " (움직였으면 --auto-moves)")
-            made_on = os.path.basename(str(cal.team.get("video", "")))
-            if cam is None and made_on and made_on != os.path.basename(video):
+            made_on = nearfar.file_name(cal.team.get("video", ""))
+            if cam is None and made_on and made_on != nearfar.file_name(video):
                 print(f"  주의: 이 보정은 HOGEUN이 {made_on} 영상에서 찍은 것입니다. 다른 경기이거나 카메라 자리가 바뀌었으면"
                       " calibration/ 에서 그 영상으로 다시 찍어야 합니다")
         return cal
     if nearfar.unsettled_20261008(cam, float(at_s)):
         print(f"  주의: HOGEUN 보정 프레임({_fmt(float(at_s))})은 {cam} 카메라가 흔들리던 때라 기록된 움직임 보정이 맞지 않습니다")
     knocks = nearfar.knocks_20261008(cam, float(at_s))
-    print(f"  {os.path.basename(video)}: 기록된 카메라 움직임 보정 (보정 프레임 {_fmt(float(at_s))} 기준) "
+    print(f"  {nearfar.file_name(video)}: 기록된 카메라 움직임 보정 (보정 프레임 {_fmt(float(at_s))} 기준) "
           + ", ".join(f"{_fmt(t)}부터 ({dx:+.1f}, {dy:+.1f})px" for t, (dx, dy) in knocks))
     return nearfar.knock_timeline(cal, knocks)
 
@@ -111,12 +111,12 @@ def with_moves(cal: Calibration, video: str, at_s: float, cache_dir: str | None 
     """`cal` (made on the frame at `at_s`) + the camera knocks futsal.camshift finds over the whole video -> a
     timeline, or `cal` itself when the camera never moved. The scan is cached as <cache_dir>/moves_<name>.json."""
     from . import camshift
-    cache = os.path.join(cache_dir or ".", f"moves_{os.path.splitext(os.path.basename(video))[0]}.json")
+    cache = os.path.join(cache_dir or ".", f"moves_{os.path.splitext(nearfar.file_name(video))[0]}.json")
     if os.path.exists(cache):
         with open(cache) as f:
             moves = json.load(f)
     else:
-        print(f"  {os.path.basename(video)}: 카메라가 움직였는지 훑는 중 (영상 전체, 몇 분)...")
+        print(f"  {nearfar.file_name(video)}: 카메라가 움직였는지 훑는 중 (영상 전체, 몇 분)...")
         moves = camshift.camera_moves(video)["moves"]
         with open(cache, "w") as f:
             json.dump(moves, f)
@@ -330,7 +330,7 @@ def run(videos: dict[str, str], cals: dict, offsets: dict[str, tuple[float, floa
         off, drift = offsets.get(cam, (0.0, 0.0))
         s_cam = (start - off) / (1 + drift)
         cache = os.path.join(out_dir, f"det_{cam}.json")
-        want = {"video": os.path.basename(path), "start": round(s_cam, 3), "duration": duration, "rate": rate_hz, "tag": tag}
+        want = {"video": nearfar.file_name(path), "start": round(s_cam, 3), "duration": duration, "rate": rate_hz, "tag": tag}
         # the file size tells two videos of the same name apart (HOGEUN's are camera1.mp4 / camera2.mp4 for any match);
         # a cache written before it was recorded still counts
         size = os.path.getsize(path) if os.path.isfile(path) else None
@@ -411,7 +411,7 @@ def calibration_record(n: int, cal: Calibration | CalibrationTimeline, out_dir: 
     if not isinstance(tl[0][1], nearfar.NearFarCalibration):
         return {"file": _rel(tapped) if tapped else None, "timeline": [{"from_s": t} for t, _ in tl]}
     team = tl[0][1].team
-    return {"file": _rel(nearfar.team_file(n, out_dir)), "video": os.path.basename(str(team.get("video", ""))),
+    return {"file": _rel(nearfar.team_file(n, out_dir)), "video": nearfar.file_name(team.get("video", "")),
             "t_sec": team.get("t_sec"),
             "timeline": [{"from_s": t, "shift_px": [round(v, 2) for v in c.shift]} for t, c in tl]}
 
