@@ -152,6 +152,83 @@ def test_assign_teams_splits_two_kits_and_leaves_unclear_boxes_blank():
     assert assign_teams(cams) == {"n_fit": 0} and all(set(c.team) == {""} for c in cams.values())
 
 
+Y1, YELLOW, BLUE, RED, BLACK, GREY, WHITE = 1, 2, 7, 11, 12, 13, 14   # upper-body bins (pipeline.detect.appearance)
+KITS = {   # upper-body bin shares per kind of shirt, as each camera renders it
+    "plain": {"bib": {YELLOW: .6, GREY: .4}, "none": {BLUE: .3, GREY: .7}, "red": {RED: .25, GREY: .75}, "dark": {BLACK: .7, GREY: .3}},
+    "loud_red": {"bib": {YELLOW: .45, BLACK: .15, WHITE: .2, GREY: .2}, "none": {BLUE: .35, BLACK: .15, WHITE: .25, GREY: .25},
+                 "red": {RED: .95, WHITE: .05}, "dark": {BLACK: .7, WHITE: .3}},
+    "dark_light": {"bib": {BLACK: .8, GREY: .2}, "none": {WHITE: .8, GREY: .2}, "red": {WHITE: .8, GREY: .2}, "dark": {BLACK: .7, GREY: .3}},
+}
+KINDS = ["bib"] * 5 + ["none"] * 4 + ["red"] * 2       # the bib side is the smaller one, so 'A = bib' is not 'A = larger'
+
+
+def _bib_scene(kit1: str, kit2: str, reid: bool = True, split: bool = False, n: int = 200) -> dict[str, CamBoxes]:
+    """Five players in bibs, four in blue and two in red shirts, seen by both cameras; a dark-clothed person stands in
+    the far goal, seen by cam2 only. In a 'loud_red' camera the red shirts are that camera's largest colour gap.
+    split: the bib's colour sits on the edge of two hue bins (yellow does: OpenCV hue 30)."""
+    rng = np.random.default_rng(7)
+    pos = [(4.0 + 3.0 * j, 4.0 + 1.1 * j) for j in range(len(KINDS))]
+    ident = np.eye(len(KINDS) + 1, 512, dtype=np.float32)
+    cams = {}
+    for name, kit in (("cam1", KITS[kit1]), ("cam2", KITS[kit2])):
+        dets, col = [], []
+        people = list(zip(pos, KINDS)) + ([((1.0, 10.0), "dark")] if name == "cam2" else [])
+        for f in range(n):
+            for j, (xy, kind) in enumerate(people):
+                b = _box_at(CAL, xy)
+                dets.append(Detection(f, f / 10, (b[0] + b[2]) / 2, b[3], 0.9, None, b[3] - b[1], None, b, ident[j] if reid else None))
+                share = dict(kit[kind])
+                if split and kind == "bib" and YELLOW in share:
+                    share[Y1] = share[YELLOW] = share[YELLOW] / 2
+                up = np.zeros(15)
+                up[list(share)] = list(share.values())
+                up = np.abs(up + rng.normal(0, 0.01, 15))
+                col.append(np.concatenate([up / up.sum(), np.full(15, 1 / 15)]))
+        cams[name] = build_cam_boxes(name, dets, CAL, 0.0, 0.0, 0.0, 10.0, COURT)
+        cams[name].color = np.array(col)
+    return cams
+
+
+def _majority(cam: CamBoxes, people: int) -> list[str]:
+    return [max(("A", "B", ""), key=lambda t: int((cam.team[j::people] == t).sum())) for j in range(people)]
+
+
+@pytest.mark.parametrize("kit1, kit2, split", [
+    ("plain", "loud_red", False), ("plain", "loud_red", True), ("loud_red", "loud_red", False),
+    pytest.param("loud_red", "loud_red", True, marks=pytest.mark.xfail(strict=True, reason=(
+        "known limit: when red shirts are both cameras' largest colour gap and the bib sits on a bin edge, red v rest "
+        "is also the pairs' best split; the old per-camera rule failed here too")))])
+def test_assign_teams_splits_bib_from_no_bib_whatever_each_camera_sees_as_its_largest_gap(kit1, kit2, split):
+    # 10/8 match: on its own, cam2's two colour clusters were red shirts v the rest, and the dark-clothed person in the
+    # far goal was put on the bib team (0.69 agreement with cam1). (plain, loud_red): the pairs carry cam1's bib split
+    # over to cam2. (loud_red, loud_red): red v rest is the largest gap in both views, and restarts that leave under a
+    # third of the pairs on one side rule out 2 v 9.
+    cams = _bib_scene(kit1, kit2, split=split)
+    info = assign_teams(cams)
+    people = len(KINDS)
+    one, two = _majority(cams["cam1"], people), _majority(cams["cam2"], people + 1)
+    assert one == two[:people] == ["A"] * 5 + ["B"] * 6               # A is the bib team in both cameras
+    assert two[people] == "B"                                         # no bib, wherever he stands
+    assert info["mode"] == "paired" and info["pair_agreement"] >= 0.99
+    for name, cam in cams.items():
+        assert info["counts"][name] == {t: int((cam.team == t).sum()) for t in ("A", "B", "")}
+        assert info["cameras"][name]["bib_bins"] == ([Y1, YELLOW] if split else [YELLOW])
+    # without ReID there are no pairs: one joint fit over both cameras, which colour alone cannot always turn into the
+    # bib split here; a camera that saw one side only must still be labelled (nearest cluster centre)
+    cams = _bib_scene(kit1, kit2, reid=False, split=split)
+    info = assign_teams(cams)
+    assert info["mode"] == "joint" and all((c.team != "").mean() > 0.9 for c in cams.values())
+
+
+def test_assign_teams_falls_back_to_cluster_centres_when_no_colour_splits_the_kits():
+    # dark v light kits: no hue keeps the two sides apart, so every box takes its nearer cluster centre
+    cams = _bib_scene("dark_light", "dark_light")
+    info = assign_teams(cams)
+    one = _majority(cams["cam1"], len(KINDS))
+    assert len(set(one[:5])) == 1 and len(set(one[5:])) == 1 and one[0] != one[5] and "" not in one
+    assert all(c["labels"] == "nearest centre" for c in info["cameras"].values())
+
+
 def _two_warped_cameras(n_frames: int = 60, with_reid: bool = True) -> tuple[dict[str, CamBoxes], np.ndarray]:
     """Ten players seen by two cameras whose calibrations disagree by a smooth warp of up to ~1 m."""
     rng = np.random.default_rng(2)

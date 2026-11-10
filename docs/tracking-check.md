@@ -11,10 +11,14 @@
 ## 준비
 
 ```powershell
-pip install -e ".[vision]"      # YOLO (처음 실행 때 yolo26s.pt 자동 다운로드)
+pip install -e ".[vision]"      # YOLO. 모델은 detection/detect_person.py에 적힌 yolo26x.pt
 ```
 
-## 1. 기준점 탭 (카메라마다 한 번)
+`yolo26x.pt`는 저장소에 들어 있지 않습니다(`*.pt`는 `.gitignore`). 저장소 맨 위 폴더에 복사해 두거나, 없으면 Ultralytics가 처음 실행할 때 내려받습니다.
+
+검출은 `detection/`(차재혁), 좌표 변환은 `calibration/`(HOGEUN)을 씁니다 ([README 한 번에 돌리기](../README.md#한-번에-돌리기)). 그래서 아래 1번 기준점 탭은 지금 기본 흐름에 필요 없습니다. 우리 탭 보정으로 되돌릴 때만 씁니다 (`trackview.py`의 주석).
+
+## 1. 기준점 탭 (예전 방식, 카메라마다 한 번)
 
 ```powershell
 python -m futsal.calibtool frame C:\Users\user\dev\futsal-videos\20261008_170919.mp4 --at 600 --camera cam1 --out calib\cam1
@@ -40,29 +44,31 @@ python -m futsal.calibtool frame C:\Users\user\dev\futsal-videos\20261008_171122
 
 ```powershell
 python -m futsal.trackview --video C:\Users\user\dev\futsal-videos\20261008_170919.mp4 C:\Users\user\dev\futsal-videos\20261008_171122.mp4 `
-    --calib calib\cam1\calib.json calib\cam2\calib.json --offset 0 124.27 --start 600 --duration 180 --out trackview
+    --offset 0 124.27 --start 600 --duration 180 --out trackview
 ```
 
 | 옵션 | 뜻 |
 |---|---|
 | `--offset 0 124.27` | 카메라별 시간 차 (cam1 = 0, cam2 = `futsal.sync` 결과) |
 | `--start 600 --duration 180` | cam1 영상 10:00부터 3분 |
-| `--auto-moves` | 카메라가 움직인 순간을 자동으로 찾아 보정 (영상 전체를 훑어서 몇 분 더 걸림). 구간 안에 카메라가 움직였으면 사용 |
-| `--rate 10` | 초당 검출 횟수. 느리면 5 |
-| `--model yolo26n.pt` | 더 빠르지만 먼 선수를 더 놓치는 모델 |
+| `--auto-moves` | 카메라가 움직인 순간을 자동으로 찾아 보정 (영상 전체를 훑어서 몇 분 더 걸림). 10/8 영상(파일 이름이나 프레임 수로 알아봄)은 기록된 움직임(cam1 2:40, cam2 46:13)을 HOGEUN 보정 프레임(`t_sec`) 기준으로 자동으로 쓰므로 필요 없습니다. 10/8 영상에서는 이 자동 감지가 틀린 움직임을 찾습니다. 다른 영상에서 이 옵션을 안 쓰면 카메라가 안 움직였다고 보고 계산합니다 (화면에 알려 줌) |
+| `--rate 10` | 추적에 쓰는 초당 프레임 수. 검출(ByteTrack)은 모든 프레임에 돕니다 |
+| `--team-calib calibration\out` | HOGEUN 좌표 변환 결과 폴더 (기본값). 카메라 N은 `H_camN_refined.json`, 없으면 `H_camN.json` |
+| `--no-video` | 확인 영상을 만들지 않음 (`tracks.json`, `summary.json`만) |
 | `--ids v2` | 추적 방식. 기본 `v2`: 카메라별 조각 → 두 카메라 짝짓기 → 팀당 5+1 자리 배정. `v2gta`: 정원 없이 연결 (짧은 구간에서 ID가 덜 바뀌지만 경기 전체에서는 잘게 나뉨). `appearance`는 예전 방식. 비교는 [추적 v2](tracking-v2.md) |
 | `--no-reid` | 사람 재식별(ReID) 계산을 건너뛰고 예전 방식으로 추적. ReID가 설치되지 않았으면 자동으로 이렇게 됩니다 |
-| `--conf 0.1` | 검출 신뢰도 하한. 기본은 `v2`면 0.1, 예전 방식이면 0.3 |
+| 모델·신뢰도 | `detection/detect_person.py`에 적힌 값 (YOLO26x, conf 0.3, imgsz 1280, ByteTrack). 바꾸려면 그 파일을 고칩니다 |
 
 **ReID 설치 (v2에 필요):** `pip install -e ".[reid]"` 다음에 `pip install --no-deps boxmot`. GPU용 torch 설치 순서는 `src/futsal/pipeline/reid.py` 맨 위 설명을 보세요.
 
-**처리 시간:** 검출이 대부분입니다. 3분 × 초당 10번 × 2대면 3,600장입니다. GPU가 없으면 수십 분 이상 걸릴 수 있으니 **먼저 `--duration 30`으로 시험**해 보세요. 검출 결과는 `det_cam1.json`에 저장되고, 같은 설정으로 다시 돌리면 검출을 건너뛰고 영상만 다시 만듭니다.
+**처리 시간:** 검출이 대부분입니다. ByteTrack이 모든 프레임을 봐야 해서 3분이면 cam1(60fps) 10,800장 + cam2(30fps) 5,400장입니다. GPU가 없으면 몇 시간 걸릴 수 있으니 **먼저 `--duration 30`으로 시험**해 보세요. 검출 결과는 `det_cam1.json`에 저장되고, 같은 설정으로 다시 돌리면 검출을 건너뛰고 추적과 영상만 다시 합니다.
 
 결과 (`trackview` 폴더):
 
 | 파일 | 내용 |
 |---|---|
-| `trackview.mp4` | 확인용 영상 (1920×1080, 초당 10장) |
+| `trackview.mp4` | 확인용 영상 (1920×1080, 초당 10장). 사람이 찍혀 있으니 저장소에 올리지 않습니다 |
+| `summary.json` | 선수별 이동거리·속도·보인 비율, 쓴 검출 설정(`detection/`)과 보정 파일(`calibration/`) |
 | `events.csv` | ID가 경기장 한가운데서 생기거나 끊긴 순간 (엑셀로 열림) |
 | `tracks.json` | 선수별 위치. 2D 지도 뷰어(`web/viewer`)로 재생 |
 | `det_cam1.json`, `det_cam2.json` | 검출 결과 (다시 돌릴 때 재사용). ReID 특징은 옆의 `det_cam1.json.reid.npy` |

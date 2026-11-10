@@ -17,7 +17,7 @@ continuation of a cut piece wherever that is unambiguous, before any long-range 
 Every box of the selected frames ends up in exactly one output tracklet; a TrackPoint carries one box per camera.
 
 Ported from experiments/sources.py (best_source(data, 'relink'), percam_source, relink, absorb_short) and the
-BoostTrack runner of experiments/percam.py (boxmot_tracklets). Teams are the generic 'A' / 'B' of
+BoostTrack runner of experiments/percam.py (boxmot_tracklets). Teams are 'A' (bib) / 'B' (no bib) of
 boxes.assign_teams; team votes go through identity.team_vote.
 
 BoostTrack proposals need boxmot (the package that also computes the ReID embeddings, pipeline/reid.py). Without it

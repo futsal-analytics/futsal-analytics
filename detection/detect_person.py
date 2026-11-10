@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 
-model = YOLO("yolo11m.pt")   # 처음 실행 시 자동 다운로드
+model = YOLO("yolo26x.pt")   # 처음 실행 시 자동 다운로드
 
 model.track(
     source=r"C:\futsal\test_1min.mp4",

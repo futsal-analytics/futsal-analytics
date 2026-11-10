@@ -39,6 +39,7 @@ class Detection:
     feat: list[int] | None = None    # upper + lower body histograms, each scaled to sum 255 (see appearance())
     box: tuple[float, float, float, float] | None = None   # x1, y1, x2, y2 in calibrated pixels (like u, v)
     reid: np.ndarray | None = field(default=None, compare=False)   # (d,) ReID embedding, in the .reid.npy sidecar
+    track_id: int | None = None    # the detector's own track id (pipeline.yolo_track: ByteTrack), not a player ID
 
 
 def _hist(hsv: np.ndarray) -> np.ndarray:
@@ -139,7 +140,9 @@ def reid_path(path: str) -> str:
 
 
 def _to_json(d: Detection) -> dict:
-    out = {f.name: getattr(d, f.name) for f in fields(d) if f.name not in ("box", "reid")}
+    out = {f.name: getattr(d, f.name) for f in fields(d) if f.name not in ("box", "reid", "track_id")}
+    if d.track_id is not None:                 # only detectors with a tracker have one; files stay as before otherwise
+        out["track_id"] = int(d.track_id)
     if d.box is not None:
         out["box"] = [float(x) for x in d.box]
     return out
