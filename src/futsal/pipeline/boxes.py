@@ -261,27 +261,77 @@ def _cross_camera_pairs(a: CamBoxes, b: CamBoxes, min_conf: float = 0.5, max_d: 
     return np.array(out, int).reshape(-1, 2)
 
 
+_SPREAD_FLOOR = 0.05       # each side's spread of the bib share counts as at least this part of the gap between the sides
+
+
+def _fit_pairs(X: np.ndarray, rng: np.random.Generator, n_init: int = 20, floor: float = 1 / 3) -> np.ndarray:
+    """Two centres for samples that hold both cameras' views of one person: the smallest inertia among restarts that
+    leave at least `floor` of the samples on the smaller side (two teams of five), else the smallest overall."""
+    best, key = None, None
+    for _ in range(n_init):
+        C = _kmeans2(X, rng, n_init=1)
+        d = ((X[:, None] - C[None]) ** 2).sum(2)
+        side = float((d.argmin(1) == 0).mean())
+        k = (min(side, 1 - side) >= floor, -float(d.min(1).sum()))
+        if key is None or k > key:
+            best, key = C, k
+    return best
+
+
+def _bib_bins(bib: np.ndarray, other: np.ndarray) -> list[int]:
+    """One camera's bib colour: the hue bin where the bib side's mean histogram exceeds the other side's most, plus a
+    neighbouring bin that carries at least half as much (a colour on a bin edge)."""
+    d = bib[:HUE_BINS] - other[:HUE_BINS]
+    top = int(np.argmax(d))
+    if d[top] <= 0:
+        return [top]
+    return sorted([top] + [nb for nb in ((top - 1) % HUE_BINS, (top + 1) % HUE_BINS) if d[nb] >= 0.5 * d[top]])
+
+
+def _bib_rule(F: np.ndarray, lab: np.ndarray, side: int, min_side: int) -> dict | None:
+    """How well cluster `side`'s own colour tells it from the other cluster in one camera's fitted samples: its bins,
+    both sides' mean and spread of that colour's share, the share of samples a midpoint threshold puts on the right
+    side ('fit'), and whether the two sides are well apart ('separates'). None when a side has under min_side."""
+    on = lab == side
+    if min(int(on.sum()), int((~on).sum())) < min_side:
+        return None
+    bins = _bib_bins(F[on].mean(0), F[~on].mean(0))
+    s = F[:, bins].sum(1)
+    m1, m0, s1, s0 = float(s[on].mean()), float(s[~on].mean()), float(s[on].std()), float(s[~on].std())
+    return {"bins": bins, "m1": m1, "m0": m0, "s1": s1, "s0": s0,
+            "fit": float(((np.abs(s - m1) < np.abs(s - m0)) == on).mean()), "separates": abs(m1 - m0) >= 2 * max(s1, s0)}
+
+
 def assign_teams(cams: dict[str, CamBoxes], min_h: float = 40, min_conf: float = 0.4, label_min_h: float = 30,
-                 margin: float = 0.95, max_fit: int = 20000, seed: int = 0, per_camera: bool = True,
-                 min_pairs: int = 50) -> dict:
-    """Split the boxes into two teams by upper-body colour and write cam.team ('A' / 'B' / '').
+                 margin: float = 0.95, odds: float = 9.0, max_fit: int = 20000, seed: int = 0, per_camera: bool = True,
+                 min_pairs: int = 50, min_side: int = 10) -> dict:
+    """Split the boxes into the bib team 'A' and the team without bibs 'B' and write cam.team ('A' / 'B' / '').
 
-    per_camera (default): each phone gets its own two colour clusters, because phones render colours differently
-    (a yellow bib looked lime in one phone of the 10/8 test and fell into the no-bib cluster of a joint fit, which
-    then split one player into two identities). Which cluster of camera 2 is which of camera 1 is decided by the
-    players both cameras see at the same moment (mutual nearest on the pitch and alike by ReID): the same person is
-    on the same team whatever the colours look like. Without ReID or with fewer than `min_pairs` such pairs the
-    joint fit below is used.
+    In our matches one side wears bibs over its own mixed shirts, so the teams are "bib or not", found in two steps.
+    1. Two clusters of the upper-body histogram (shares per hue / black / grey / white bin). With two cameras and at
+       least `min_pairs` box pairs that are one person (mutual nearest on the pitch and alike by ReID, every 5th
+       frame; per_camera=True), one k-means runs over the pairs, each pair one sample holding both views. A camera on
+       its own is not enough: the phones render colours differently (a yellow bib looked lime in one phone of the
+       10/8 test), and one camera's largest colour gap need not be the teams (cam2 of the 10/8 match on its own split
+       red shirts from the rest: 0.69 agreement with cam1). Restarts that leave under a third of the pairs on one side
+       are passed over (5 v 5). Without pairs, or when the pairs do not give a bib split (all from one team): one
+       joint fit on the confident, big, in-court boxes of every camera.
+    2. The bib side is the cluster whose own colour best tells it from the other (a bib is one colour on every
+       player of its side; a mixed side's largest colour group is only part of it). In each camera its colour is the
+       hue bin where its mean histogram exceeds the other side's most, plus a neighbour with at least half that. A
+       box at least `label_min_h` px tall is labelled by its share of that colour, each side with its own mean and
+       spread (so a bib seen in part still reads as bib), a share beyond a side's mean counting as that mean. It
+       stays '' when the two likelihoods are within `odds` of each other, or when its share is about as far from both
+       means (within `margin`, as for a box half-way between two kits). Where that colour does not keep the sides
+       apart (two kits differing only in black / white, too few samples of one side in a camera), the box takes the
+       nearer cluster centre instead (the rule before this one).
+    Returns a summary: mode ('paired' / 'joint'), n_fit (the confident, big, in-court boxes), pairs and their label
+    agreement, label counts, per camera the bib bins, the two sides' mean bib share and which rule labelled it, and
+    the side means as 'centres'; {'n_fit': n} with every team '' when there is too little colour to fit.
 
-    Bibs or shirts are the one thing every player of a team shares, so two clusters of the upper-body histogram
-    (shares per hue / black / grey / white bin) are the two teams. The clusters are fitted on confident, big,
-    in-court boxes only: spectators and tiny boxes have mixed colours and would pull the centres. Every box at
-    least `label_min_h` px tall is then labelled with its nearer centre unless the two distances are within
-    `margin` of each other (''). A is the larger cluster. Returns a summary (fit size, centres, label counts),
-    or {'n_fit': n} with every team '' when there is too little colour to fit.
-
-    On the research window (one team in yellow bibs, the other without) this agrees with the yellow-share rule on
-    99 % of the boxes both label, and labels 98 % of the boxes that rule labels."""
+    On the 10/8 match, against the players of two AI-corrected, not yet human-checked cam1 clips (cam2 through the
+    boxes paired with them): cam1 0.949 -> 0.98 and cam2 0.742 -> 0.99 of the labels right, cameras agreeing on
+    0.98 of the pairs (was 0.69)."""
     for c in cams.values():
         c.team = np.full(len(c), "", dtype="<U1")
     rng = np.random.default_rng(seed)
@@ -294,57 +344,70 @@ def assign_teams(cams: dict[str, CamBoxes], min_h: float = 40, min_conf: float =
         valid = s > 0
         F = up / np.maximum(s, 1e-9)[:, None]
         feats[name] = (F, valid, valid & (c.h >= min_h) & (c.conf >= min_conf) & c.in_court)
-
-    def fit(F_fit: np.ndarray) -> np.ndarray:
-        if len(F_fit) > max_fit:
-            F_fit = F_fit[rng.choice(len(F_fit), max_fit, replace=False)]
-        return _kmeans2(F_fit, rng)
-
-    def label(name: str, C: np.ndarray) -> np.ndarray:
-        """Cluster index per box, -1 where the colour is unclear or the box too small."""
-        F, valid, _ = feats[name]
-        D = np.sqrt(((F[:, None] - C[None]) ** 2).sum(2))
-        ok = valid & (D.min(1) < margin * D.max(1)) & (cams[name].h >= label_min_h)
-        return np.where(ok, D.argmin(1), -1)
-
-    labels: dict[str, np.ndarray] = {}
-    centres: dict[str, np.ndarray] = {}
-    info: dict = {"mode": "joint"}
     names = list(feats)
-    if per_camera and len(names) == 2 and all(feats[n][2].sum() >= 20 for n in names):
-        for n in names:
-            centres[n] = fit(feats[n][0][feats[n][2]])
-            labels[n] = label(n, centres[n])
+    n_fit = int(sum(feats[n][2].sum() for n in names))
+    P = np.zeros((0, 2), int)
+    if per_camera and len(names) == 2:
         P = _cross_camera_pairs(cams[names[0]], cams[names[1]])
-        la = labels[names[0]][P[:, 0]] if len(P) else np.zeros(0, int)
-        lb = labels[names[1]][P[:, 1]] if len(P) else np.zeros(0, int)
-        both = (la >= 0) & (lb >= 0)
-        if both.sum() >= min_pairs:
-            same = int((la[both] == lb[both]).sum())
-            diff = int(both.sum()) - same
-            if diff > same:                              # camera 2's clusters are numbered the other way round
-                labels[names[1]] = np.where(labels[names[1]] >= 0, 1 - labels[names[1]], -1)
-                centres[names[1]] = centres[names[1]][::-1]
-            info = {"mode": "per_camera", "pairs": int(both.sum()), "pair_agreement": round(max(same, diff) / both.sum(), 4)}
-    if info["mode"] == "joint":
+        P = P[feats[names[0]][1][P[:, 0]] & feats[names[1]][1][P[:, 1]]] if len(P) else P
+
+    def paired():                   # {camera: (fitted histograms, their cluster 0 / 1)}, {camera: the two centres}
+        if len(P) < min_pairs:
+            return None
+        a, b = names
+        X = np.hstack([feats[a][0][P[:, 0]], feats[b][0][P[:, 1]]])                # one person, both views, one sample
+        C = _fit_pairs(X, rng)
+        lab = ((X[:, None] - C[None]) ** 2).sum(2).argmin(1)
+        return {a: (feats[a][0][P[:, 0]], lab), b: (feats[b][0][P[:, 1]], lab)}, {a: C[:, :UPPER], b: C[:, UPPER:]}
+
+    def joint():
         F_fit = np.vstack([feats[n][0][feats[n][2]] for n in names]) if names else np.zeros((0, UPPER))
         if len(F_fit) < 20:
-            return {"n_fit": int(len(F_fit))}
-        C = fit(F_fit)
-        for n in names:
-            centres[n] = C
-            labels[n] = label(n, C)
-    # A is the larger team (over the confident in-court boxes), so labels do not depend on cluster numbering
-    n0 = sum(int(((labels[n] == 0) & feats[n][2]).sum()) for n in names)
-    n1 = sum(int(((labels[n] == 1) & feats[n][2]).sum()) for n in names)
-    a_idx = 0 if n0 >= n1 else 1
-    counts = {}
-    for n in names:
-        lab = labels[n]
-        cams[n].team = np.where(lab < 0, "", np.where(lab == a_idx, "A", "B")).astype("<U1")
-        counts[n] = {t: int((cams[n].team == t).sum()) for t in ("A", "B", "")}
-    order = (lambda C: C) if a_idx == 0 else (lambda C: C[::-1])
-    return info | {"n_fit": int(sum(feats[n][2].sum() for n in names)), "counts": counts,
-                   "centres": {n: {"A": order(centres[n])[0].round(4).tolist(), "B": order(centres[n])[1].round(4).tolist()}
-                               for n in names}}
+            return None
+        C = _kmeans2(F_fit[rng.choice(len(F_fit), max_fit, replace=False)] if len(F_fit) > max_fit else F_fit, rng)
+        return {n: (feats[n][0][feats[n][2]], ((feats[n][0][feats[n][2]][:, None] - C[None]) ** 2).sum(2).argmin(1))
+                for n in names}, {n: C for n in names}
 
+    chosen = None
+    for mode, make in (("paired", paired), ("joint", joint)):
+        fit = make()
+        if fit is None:
+            continue
+        fitted, centre = fit
+        rules = [{n: _bib_rule(*fitted[n], j, min_side) for n in names} for j in (0, 1)]
+        weight = lambda j: [(r, len(fitted[n][1])) for n, r in rules[j].items() if r]
+        score = [(sum(r["fit"] * w for r, w in weight(j)) / max(1, sum(w for _, w in weight(j))),
+                  sum(abs(r["m1"] - r["m0"]) * w for r, w in weight(j))) for j in (0, 1)]
+        bib = int(score[1] > score[0])
+        chosen = (mode, fitted, centre, bib, rules[bib])
+        if weight(bib) and all(r["separates"] for r, _ in weight(bib)):
+            break
+    if chosen is None:
+        return {"n_fit": n_fit}
+    mode, fitted, centre, bib, rules = chosen
+    per_cam = {}
+    for n in names:
+        F, valid, _ = feats[n]
+        r = rules[n]
+        if r is None or not r["separates"]:
+            D = np.sqrt(((F[:, None] - centre[n][None]) ** 2).sum(2))
+            ok = valid & (D.min(1) < margin * D.max(1)) & (cams[n].h >= label_min_h)
+            cams[n].team = np.where(ok, np.where(D.argmin(1) == bib, "A", "B"), "").astype("<U1")
+            per_cam[n] = {"bib_bins": r["bins"] if r else [], "labels": "nearest centre"}
+            continue
+        m1, m0 = r["m1"], r["m0"]
+        s1, s0 = (max(s, _SPREAD_FLOOR * abs(m1 - m0), 1e-3) for s in (r["s1"], r["s0"]))
+        x = np.clip(F[:, r["bins"]].sum(1), min(m0, m1), max(m0, m1))     # beyond a side's mean counts as that mean
+        llr = (-0.5 * ((x - m1) / s1) ** 2 - np.log(s1)) - (-0.5 * ((x - m0) / s0) ** 2 - np.log(s0))
+        d1, d0 = np.abs(x - m1), np.abs(x - m0)
+        ok = valid & (np.abs(llr) >= np.log(odds)) & (np.minimum(d1, d0) < margin * np.maximum(d1, d0)) & (cams[n].h >= label_min_h)
+        cams[n].team = np.where(ok, np.where(llr > 0, "A", "B"), "").astype("<U1")
+        per_cam[n] = {"bib_bins": r["bins"], "bib_share": [round(m1, 4), round(m0, 4)], "labels": "bib share"}
+    info = {"mode": mode, "n_fit": n_fit}
+    if len(P):
+        la, lb = cams[names[0]].team[P[:, 0]], cams[names[1]].team[P[:, 1]]
+        both = (la != "") & (lb != "")
+        info |= {"pairs": int(both.sum()), "pair_agreement": round(float((la[both] == lb[both]).mean()), 4) if both.any() else 0.0}
+    means = {n: [F[lab == j].mean(0) if (lab == j).any() else np.zeros(UPPER) for j in (0, 1)] for n, (F, lab) in fitted.items()}
+    return info | {"counts": {n: {t: int((cams[n].team == t).sum()) for t in ("A", "B", "")} for n in names}, "cameras": per_cam,
+                   "centres": {n: {"A": means[n][bib].round(4).tolist(), "B": means[n][1 - bib].round(4).tolist()} for n in names}}

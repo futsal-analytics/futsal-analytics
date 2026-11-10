@@ -12,8 +12,8 @@ the boxes of `cams` (pipeline.boxes.CamBoxes): their size, confidence, team labe
     dbscan_split                              purity splitter on clean-crop ReID
     fill_gaps, smooth                         cosmetic gap filling once identities are fixed
 
-Teams are the generic labels of boxes.assign_teams: 'A' / 'B' per box ('' = unclear), and 'A' / 'B' / 'U'
-(undecided) per track. Everything here is symmetric in A and B.
+Teams are the labels of boxes.assign_teams: 'A' (bib team) / 'B' (no bib) per box ('' = unclear), and 'A' / 'B' /
+'U' (undecided) per track. Everything here is symmetric in A and B.
 
 Per-box covariances and clean-crop masks are cached per CamBoxes object (and parameter set): they depend only on
 the boxes and the calibration, which never change after boxes.build_cam_boxes (alignment moves `xy` only).

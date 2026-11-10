@@ -127,7 +127,7 @@ def test_v2_gives_one_identity_per_player_with_teams(v2):
     who = _match(ts)
     lab = {p.id: p.team for p in ts.players}
     assert set(lab.values()) == {"A", "B"}
-    # A / B are cluster names: one consistent mapping onto the two kits
+    # A is the bib team, B the other kit: one consistent mapping onto the two kits
     pairs = {(lab[i], PLAYERS[j][0]) for i, j in who.items()}
     assert len(pairs) == 2 and len({a for a, _ in pairs}) == 2
     # extras for the caller: alignment found cam2's error, the solver ran
