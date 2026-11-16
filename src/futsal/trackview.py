@@ -12,9 +12,11 @@
              한 프레임 보정 H_cam<N> + 10/8 기록된 카메라 움직임, 또는 --auto-moves
   시간 맞추기 --offset (python -m futsal.sync 결과). 10분 이상이면 선수 위치로 두 폰 시계 어긋남을 한 번 더 보정
   추적       추적 v2 (아래 --ids)
+  공         --ball: ball_tracking/ (차재혁) 의 track_ball.py 결과를 선수와 같은 보정·시계·카메라 정렬로 지도에 올림
+             (pipeline/ball.py; ball_tracking/to_court.py 는 쓰지 않음)
 
 결과 (--out 폴더):
-  tracks.json    선수별 위치 (web/viewer 로 재생 가능)
+  tracks.json    선수별 위치, --ball 이면 공 위치도 (web/viewer 로 재생 가능)
   summary.json   선수별 이동거리·속도·보인 비율, 쓴 검출 설정과 보정 파일
   events.csv     ID가 경기장 한가운데서 새로 생기거나 끊긴 순간 (= ID가 바뀌었을 가능성이 큰 곳) 목록
   trackview.mp4  확인 영상. 위: 두 카메라 화면에 선수 ID, 아래: 2D 지도 + ID 사건 목록 (--no-video 면 안 만듦)
@@ -53,6 +55,7 @@ from .court import Court
 from .homography import Calibration, CalibrationTimeline, calibration_at, timeline_from_json
 from .pipeline import detect, yolo_track
 from .pipeline.align import corrected_sync
+from .pipeline.ball import ball_track, clock_shift
 from .pipeline.run import IDS, LINKERS, build_tracks
 from .tracks import TrackSet
 
@@ -322,6 +325,10 @@ def render(out_path: str, videos: dict[str, str], cals: dict, offsets: dict, ts:
             (x, y), = P(xy)
             cv2.circle(m, (int(x), int(y)), 8, color_of(pid), -1, cv2.LINE_AA)
             cv2.putText(m, str(pid), (int(x) + 9, int(y) - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+        if ts.ball is not None and k < len(ts.ball) and np.all(np.isfinite(ts.ball[k])):
+            (x, y), = P(ts.ball[k])
+            cv2.circle(m, (int(x), int(y)), 6, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(m, (int(x), int(y)), 6, (0, 0, 0), 1, cv2.LINE_AA)
         for e in events:
             if 0 <= t_rel - e["t"] < 2.5:            # flash the event for 2.5 s
                 (x, y), = P([e["x"], e["y"]])
@@ -348,14 +355,16 @@ def render(out_path: str, videos: dict[str, str], cals: dict, offsets: dict, ts:
 
 def run(videos: dict[str, str], cals: dict, offsets: dict[str, tuple[float, float]], start: float, duration: float,
         out_dir: str, detector_factory, court: Court, rate_hz: float = 10.0, fps_out: float = 10.0,
-        det_tag: str = "", embedder=None, ids: str = "v2", video: bool = True, summary: dict | None = None) -> dict:
+        det_tag: str = "", embedder=None, ids: str = "v2", video: bool = True, summary: dict | None = None,
+        ball: dict[str, str] | None = None, ball_videos: dict[str, str] | None = None) -> dict:
     """Detect (cached per camera), track with build_tracks(ids=...), write tracks.json / events.csv / summary.json and,
     with `video`, trackview.mp4. `detector_factory(cam)` gives the camera's detector, which sees every frame of the
     window in order (pipeline.yolo_track.detection_tracker: detection/'s YOLO + ByteTrack; a plain detect.Detector
     works too); its boxes are kept at `rate_hz` (yolo_track.track_video). `embedder` (pipeline.reid.reid_embedder)
     adds a ReID embedding to every kept box, which ids="v2" / "v2gta" need; without it they fall back to
     "appearance". The detection cache key is `det_tag` plus whether ReID was computed. `summary` (optional) goes into
-    summary.json next to the run's own numbers (per-player distance, speed, time seen)."""
+    summary.json next to the run's own numbers (per-player distance, speed, time seen). `ball` {camera: track_ball.py
+    CSV} (made from `ball_videos` {camera: video}, default the camera's own video) adds the ball (pipeline.ball)."""
     os.makedirs(out_dir, exist_ok=True)
     tag = det_tag + ("+reid" if embedder is not None else "")
     dets = {}
@@ -404,6 +413,10 @@ def run(videos: dict[str, str], cals: dict, offsets: dict[str, tuple[float, floa
         xy[:m] = p.xy[:m]
         p.xy = xy
     ts.players = [p for p in ts.players if np.any(np.isfinite(p.xy[:, 0]))]
+    ball_rec = None
+    if ball:                                               # the players' calibration, corrected clock and alignment
+        ts.ball, ts.ball_cam, ball_rec = ball_track(ball, ball_videos or {}, videos, cals, offsets, start, rate_hz, n, al, court)
+        print(f"  공: 프레임 {ball_rec['frames_with_ball']:.0%}에 위치 (카메라별 {ball_rec['from_camera']})")
     ts.start = start
     ts.compute_stats()
     ts.dump(os.path.join(out_dir, "tracks.json"))
@@ -420,6 +433,7 @@ def run(videos: dict[str, str], cals: dict, offsets: dict[str, tuple[float, floa
               **{k: res[k] for k in ("tracker", "detections", "ids", "ids_over_half", "events")},
               "tracklets": info.get("tracklets"), "clock": clk,
               "alignment": al and {k: al[k] for k in ("pairs", "median_before_m", "median_after_m") if k in al},
+              **({"ball": ball_rec} if ball_rec else {}),
               "players": [{"id": p.id, "team": p.team, "seen_share": round(seen[p.id], 3), **p.stats} for p in ts.players]}
     with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(record, f, ensure_ascii=False, indent=1, default=str)
@@ -476,6 +490,10 @@ def main(argv=None):
     ap.add_argument("--no-reid", action="store_true", help="ReID 계산을 건너뛰고 예전 방식(appearance)으로 추적")
     ap.add_argument("--auto-moves", action="store_true", help="카메라가 움직인 순간을 자동으로 찾아 보정 (futsal.camshift)")
     ap.add_argument("--no-video", action="store_true", help="확인 영상(trackview.mp4)을 만들지 않음")
+    ap.add_argument("--ball", nargs="+", default=None, metavar="CSV",
+                    help="공: 카메라마다 ball_tracking/track_ball.py 결과 (cam1 [cam2], 없는 카메라는 -)")
+    ap.add_argument("--ball-video", nargs="+", default=None, metavar="VIDEO",
+                    help="--ball 을 만든 영상 (기본: --video). 원본과 시작을 맞춘 사본(_sync)처럼 다르면 꼭 지정")
     ap.add_argument("--out", default="trackview")
     a = ap.parse_args(argv)
     # if len(a.calib) != len(a.video):
@@ -504,6 +522,17 @@ def main(argv=None):
     if team and (court.length, court.width) != (40.0, 20.0):     # calibration/court.py: L, W = 40, 20
         ap.error("calibration/ (HOGEUN) 좌표 변환은 40x20 코트만 됩니다 (--court 40x20)")
     offsets = {n: (o, d) for n, o, d in zip(names, offs, drifts)}
+    if len(a.ball or []) > len(names) or (a.ball_video and len(a.ball_video) != len(a.ball or [])):
+        ap.error("--ball 은 영상 수까지, --ball-video 는 --ball 과 같은 개수로 주세요")
+    ball = {n: p for n, p in zip(names, a.ball or []) if p != "-"}
+    ball_videos = {n: v for n, v in zip(names, a.ball_video or []) if v != "-"}
+    for n, p in ball.items():                              # before hours of detection, not after
+        if not os.path.isfile(p):
+            ap.error(f"공 결과 파일이 없습니다: {p}")
+        try:
+            clock_shift(ball_videos.get(n, videos[n]), videos[n])
+        except ValueError as e:
+            ap.error(str(e))
     ids = "appearance" if a.no_reid and a.ids in LINKERS else a.ids
     embedder = None
     if ids in LINKERS:
@@ -526,7 +555,7 @@ def main(argv=None):
     summary["detection"] = {"file": _rel(settings["file"]), "model": settings["model"], "track": yolo_track.track_kwargs(settings)}
     res = run(videos, cals, offsets, a.start, a.duration, a.out, lambda cam: yolo_track.detection_tracker(settings),
               court, a.rate, det_tag=yolo_track.tag(settings), embedder=embedder, ids=ids, video=not a.no_video,
-              summary=summary)
+              summary=summary, ball=ball or None, ball_videos=ball_videos)
     print(f"\n추적 방식 {res['tracker']}: ID {res['ids']}개 (구간 절반 이상 보인 ID {res['ids_over_half']}개), "
           f"경기장 한가운데서 생기거나 끊긴 ID {res['events']}건")
     outs = ["tracks.json", "summary.json", "events.csv"] + ([] if a.no_video else ["trackview.mp4"])
