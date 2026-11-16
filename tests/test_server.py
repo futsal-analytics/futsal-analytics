@@ -1,6 +1,8 @@
 """End-to-end through the HTTP API with synthetic videos (no GPU / YOLO needed)."""
 import numpy as np
 import pytest
+
+pytest.importorskip("fastapi")              # the server extra (pip install -e ".[server]"); the rest runs without it
 from fastapi.testclient import TestClient
 
 from futsal import Court

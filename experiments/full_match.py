@@ -1,11 +1,14 @@
 """Whole-match tracking from the full cache (experiments/cache_full, 10/8 test, ~53 min of overlap) with the src v2 tracker.
 
 python experiments/full_match.py [--render] [--cache experiments/cache_full26] [--out experiments/full_match_team] [--linker closed|gta]
+                                 [--ball c1_track.csv c2_track.csv --ball-video <the videos 차재혁 ran ball_tracking/ on>]
 Writes <out>/tracks.json (TrackSet, web/viewer format), events.csv, summary.json (per-player distance,
 speed, time seen), calib_timeline_<cam>.json and, with --render, trackview.mp4 (two camera panels + 2D map).
-Coordinates: HOGEUN's calibration (calibration/out through calibration/court_map.py, futsal.nearfar), with the camera
-knocks of the 10/8 videos taken relative to the frame it was clicked on (t_sec, 60 s: nearfar.knocks_20261008; cam1
-knocked at 2:40 after that frame, cam2 at 46:13).
+--ball adds the ball from ball_tracking/track_ball.py on the players' calibration, clock and grid (futsal.pipeline.ball).
+Coordinates: HOGEUN's whole-match calibration (calibration/out/<match>/calib_cam<N>.json through
+calibration/court_map.py, futsal.nearfar.team_timeline): he followed each camera (cam1 knocked at 2:40, cam2 at 46:13),
+so its stretches replace our measured 10/8 knocks; the match and the clock shift come from the video names
+(nearfar.find_video). Boxes where he found no court get no position.
 Detections: the cache's own boxes (experiments/build_cache.py: our YOLO26x predict, conf 0.1, 10 Hz, OSNet ReID), not
 detection/; python -m futsal.trackview runs detection/ on the videos. Nothing is written into calib/ or calibration/.
 """
@@ -22,8 +25,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 from futsal.court import Court
 from futsal.homography import timeline_from_json
+from futsal import nearfar
 from futsal.nearfar import NearFarCalibration, knock_timeline, knocks_20261008, load_team, save_timeline, team_file
 from futsal.pipeline.align import corrected_sync
+from futsal.pipeline.ball import ball_track, clock_shift, read_track
 from futsal.pipeline.boxes import cam_boxes_from_cache
 from futsal.pipeline.detect import Detection
 from futsal.pipeline.run import tracks_to_trackset, track_cams
@@ -37,17 +42,31 @@ OUT = os.path.join(ROOT, "experiments", "full_match_team")    # experiments/full
 KNOCKS = {"cam1": [(0.0, (41.0, 19.0)), (159.9, (0.0, 0.0))], "cam2": [(0.0, (0.0, 0.0)), (2773.0, (13.8, 1.3))]}
 
 
-def timeline(cam: str) -> list:
-    """[(from_s, calibration)] of one camera on its own clock: HOGEUN's calibration with the 10/8 knocks."""
-    # To switch back to our tapped calibration (calib/<cam>/calib.json): uncomment these two, drop the last two.
+def timeline(cam: str, video: str | None = None) -> list:
+    """[(from_s, calibration)] of one camera on its own clock (`video`: its file, by default the 10/8 original):
+    HOGEUN's whole-match calibration."""
+    # To switch back to our tapped calibration (calib/<cam>/calib.json): uncomment these two, drop the rest.
     # base = timeline_from_json(json.load(open(os.path.join(ROOT, "calib", cam, "calib.json"), encoding="utf-8")))
     # return knock_timeline(base, KNOCKS[cam])
-    base = load_team(int(cam.removeprefix("cam")))
-    return knock_timeline(base, knocks_20261008(cam, float(base.team["t_sec"])))
+    # HOGEUN's single-frame calibration with our 10/8 knocks (until 2026-11-13; his t_sec is now on the clock of the
+    # start-aligned copy, so add the shift of find_video): uncomment these two, drop the rest.
+    # base = load_team(int(cam.removeprefix("cam")))
+    # return knock_timeline(base, knocks_20261008(cam, float(base.team["t_sec"]) + nearfar.find_video(video or nearfar.VIDEOS_20261008[cam][0])[2]))
+    found = nearfar.find_video(video or nearfar.VIDEOS_20261008[cam][0])
+    if found is None or f"cam{found[1]}" != cam:
+        raise ValueError(f"{video}: not {cam} of a match in calibration/out ({found})")
+    out_dir, n, shift = found
+    return nearfar.team_timeline(n, out_dir, shift)
 
 
-def calib_record(cam: str, tl: list) -> dict:
-    """summary.json's note of which calibration a camera used, and its knock shifts."""
+def calib_record(cam: str, tl: list, video: str | None = None) -> dict:
+    """summary.json's note of which calibration a camera used: HOGEUN's file and its stretches, or the knock shifts."""
+    if isinstance(tl[0][1], NearFarCalibration) and "source" in tl[0][1].team:
+        out_dir, n, shift = nearfar.find_video(video or nearfar.VIDEOS_20261008[cam][0])
+        seg = lambda c: (c.team["source"], c.team.get("segment_s"))       # one of HOGEUN's segments (a knock starts one)
+        return {"file": os.path.relpath(nearfar.tracked_file(n, out_dir), ROOT).replace(os.sep, "/"), "clock_shift_s": shift,
+                "stretches": [(round(t, 3), c.team["source"]) for k, (t, c) in enumerate(tl)
+                              if k == 0 or seg(c) != seg(tl[k - 1][1])]}
     if isinstance(tl[0][1], NearFarCalibration):
         return {"file": os.path.relpath(team_file(int(cam.removeprefix("cam"))), ROOT).replace(os.sep, "/"),
                 "knocks": [(t, c.shift) for t, c in tl]}
@@ -60,16 +79,30 @@ if __name__ == "__main__":
     ap.add_argument("--cache", default=CACHE)
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--linker", default="closed", choices=("closed", "gta"))
+    ap.add_argument("--ball", nargs="+", default=None, metavar="CSV", help="ball_tracking/track_ball.py CSVs: cam1 [cam2] (- to skip)")
+    ap.add_argument("--ball-video", nargs="+", default=None, metavar="VIDEO",
+                    help="the videos the CSVs were made from (default: the cache's videos; 차재혁's 10/8 run used the _sync copies)")
     a = ap.parse_args()
     CACHE, OUT = a.cache, a.out
     os.makedirs(OUT, exist_ok=True)
     meta = json.load(open(os.path.join(CACHE, "meta.json")))
     court, rate, start = Court(), float(meta["rate"]), float(meta["start"])
+    names = list(meta["videos"])
+    if len(a.ball or []) > len(names) or (a.ball_video and len(a.ball_video) != len(a.ball or [])):
+        ap.error("--ball: at most one CSV per camera; --ball-video: as many as --ball")
+    ball = {c: p for c, p in zip(names, a.ball or []) if p != "-"}
+    ball_videos = {c: v for c, v in zip(names, a.ball_video or []) if v != "-"}
+    for c, p in ball.items():                              # before the ~10 min of tracking, not after
+        try:
+            read_track(p)
+            clock_shift(ball_videos.get(c, meta["videos"][c]), meta["videos"][c])
+        except (OSError, ValueError) as e:
+            ap.error(str(e))
     t0 = time.time()
     cams, cals = {}, {}
     for cam in meta["videos"]:
         path = os.path.join(OUT, f"calib_timeline_{cam}.json")     # was calib/<cam>/calib_timeline.json: <out> only now
-        save_timeline(timeline(cam), path)
+        save_timeline(timeline(cam, meta["videos"][cam]), path)
         with open(path, encoding="utf-8") as f:              # read back: the run uses what the file holds
             cals[cam] = timeline_from_json(json.load(f))
         cams[cam] = cam_boxes_from_cache(os.path.join(CACHE, f"{cam}.npz"), cam, cals[cam], float(meta["offsets"][cam]),
@@ -86,6 +119,14 @@ if __name__ == "__main__":
           f"teams {info['teams'].get('mode')}; windows {getattr(st, 'windows', '?')} ({time.time() - t0:.0f}s)", flush=True)
     n = 1 + max(max(c.by_k) for c in cams.values())
     ts = tracks_to_trackset(ids, cams, court, rate, n, slot_teams or None)
+    offsets = {cam: (float(meta["offsets"][cam]), 0.0) for cam in cams}       # the players' clock, as corrected
+    if clock is not None and clock["applied"]:
+        offsets[clock["camera"]] = corrected_sync(*offsets[clock["camera"]], clock, start)
+    ball_rec = None
+    if ball:
+        ts.ball, ts.ball_cam, ball_rec = ball_track(ball, ball_videos, meta["videos"], cals, offsets, start, rate, n,
+                                                    info["alignment"], court)
+        print(f"ball: {ball_rec}", flush=True)
     ts.start = start
     ts.compute_stats()
     ts.dump(os.path.join(OUT, "tracks.json"))
@@ -97,12 +138,13 @@ if __name__ == "__main__":
             w.writerow([_fmt(start + e["t"]), e["id"], e["kind"], e["x"], e["y"]])
     seen = {p.id: float(np.isfinite(p.xy[:, 0]).mean()) for p in ts.players}
     summary = {"detector": meta.get("model"), "detections": f"{os.path.basename(CACHE)} (experiments/build_cache.py, conf {meta.get('conf')})",
-               "calib": {cam: calib_record(cam, cals[cam]) for cam in cams},
+               "calib": {cam: calib_record(cam, cals[cam], meta["videos"][cam]) for cam in cams},
                "linker": a.linker, "clock": clock, "window_cam1_s": [start, start + n / rate], "identities": len(ts.players), "events": len(events),
                "events_per_min": round(len(events) / (n / rate / 60), 2), "tracklets": info["tracklets"],
                "alignment": info["alignment"] and {k: info["alignment"][k] for k in ("pairs", "median_before_m", "median_after_m")},
                "teams": {k: v for k, v in info["teams"].items() if k in ("mode", "pairs", "pair_agreement", "counts")},
                "windowed": {k: getattr(st, k) for k in ("windows", "new_ids", "ended", "agreement") if hasattr(st, k)},
+               **({"ball": ball_rec} if ball_rec else {}),
                "players": [{"id": p.id, "team": p.team, "seen_share": round(seen[p.id], 3), **p.stats} for p in ts.players]}
     json.dump(summary, open(os.path.join(OUT, "summary.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1, default=str)
     long_ids = sum(1 for v in seen.values() if v > 0.5)
@@ -114,8 +156,5 @@ if __name__ == "__main__":
             m = c.conf >= 0.3
             dets[cam] = [Detection(int(c.fid[i]), float(c.t[i]), float(c.foot[i, 0]), float(c.foot[i, 1]), float(c.conf[i]), None,
                                    float(c.h[i]), box=tuple(float(v) for v in c.xyxy[i])) for i in np.flatnonzero(m)]
-        offsets = {cam: (float(meta["offsets"][cam]), 0.0) for cam in cams}
-        if clock is not None and clock["applied"]:
-            offsets[clock["camera"]] = corrected_sync(*offsets[clock["camera"]], clock, start)
         frames = render(os.path.join(OUT, "trackview.mp4"), meta["videos"], cals, offsets, ts, dets, court, start, events)
         print(f"rendered {frames} frames ({time.time() - t0:.0f}s)", flush=True)

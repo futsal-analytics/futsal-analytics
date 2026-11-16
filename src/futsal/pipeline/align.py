@@ -82,10 +82,16 @@ def apply_alignment(cams: dict[str, CamBoxes], coef: dict[str, list], court: Cou
         cam = cams.get(name)
         if cam is None or not len(cam):
             continue
-        m = VALID_MARGIN_M
-        at = np.stack([np.clip(cam.xy_raw[:, 0], -m, court.length + m), np.clip(cam.xy_raw[:, 1], -m, court.width + m)], 1)
-        cam.xy = cam.xy_raw + 0.5 * (_features(at, court) @ np.asarray(W, float))
+        cam.xy = aligned(cam.xy_raw, W, court)
         cam.in_court = court.contains(cam.xy, COURT_MARGIN_M)
+
+
+def aligned(xy: np.ndarray, W, court: Court = Court()) -> np.ndarray:
+    """xy moved by half the correction field W, evaluated at the nearest point of the pitch + VALID_MARGIN_M
+    (apply_alignment's rule; also for points that are not boxes, such as the ball). NaN stays NaN."""
+    m = VALID_MARGIN_M
+    at = np.stack([np.clip(xy[:, 0], -m, court.length + m), np.clip(xy[:, 1], -m, court.width + m)], 1)
+    return xy + 0.5 * (_features(at, court) @ np.asarray(W, float))
 
 
 def align_cameras(cams: dict[str, CamBoxes], court: Court, min_conf: float = 0.5, max_d: float = 2.5,

@@ -16,10 +16,11 @@
 | `src/futsal/camshift.py` | 촬영 중 카메라가 움직인 순간 자동 감지 → 시간 구간별 좌표 보정 | ✅ |
 | `src/futsal/check.py` | 촬영 영상 점검: `python -m futsal.check cam1.mp4 cam2.mp4` (프레임 간격, 밝기, 미리보기, 시간 차이) | ✅ |
 | `src/futsal/syncview.py` | 시간 맞추기 눈으로 확인: `python -m futsal.syncview cam1.mp4 cam2.mp4 --offset 124.29` (같은 순간 프레임 + 소리 겹쳐 그림) | ✅ |
-| `src/futsal/ball/` | 공 검출: 라벨링용 프레임 뽑기, 조각 학습 데이터, 공개 데이터 합치기, 학습, 조각 검출 + 궤적 정리 | ✅ 도구 완료, 학습 진행 중 |
+| `src/futsal/ball/` | 예전 공 검출 도구 (라벨링용 프레임 뽑기, 조각 검출 + 궤적 정리). 파이프라인에서는 쓰지 않음 (공은 `ball_tracking/`) | 테스트만 있음 |
 | `src/futsal/pipeline/` | PC에서 실제 영상 → 검출 → 병합 → 추적 (앱 결과와 비교할 정답 생성) | ✅ 합성 영상으로 검증, 실제 영상 검증 필요 |
 | `detection/` | **탐지 (차재혁)**: YOLO 사람 검출 + ByteTrack 스크립트. 파이프라인이 이 파일의 모델·설정을 읽어 씀 (YOLO26x) | ✅ 파이프라인에 연결 |
-| `calibration/` | **좌표 변환 (HOGEUN)**: 카메라마다 두 호모그래피(가까운 쪽·먼 쪽), 흰 선 보정, `court_map.py` | ✅ 파이프라인에 연결 |
+| `calibration/` | **좌표 변환 (HOGEUN)**: 카메라마다 두 호모그래피(가까운 쪽·먼 쪽), 흰 선 보정, 경기 전체 시간별 보정, `court_map.py` | ✅ 파이프라인에 연결 |
+| `ball_tracking/` | **공 검출·추적 (차재혁)**: 공 전용 YOLO26s(`best.pt`, 구글 드라이브) 1280·1920 두 번 검출 → 합치기 → 예비공 지우기 → 칼만 추적 | ✅ 결과를 파이프라인 지도에 연결 (실제 공 결과로는 아직 확인 안 함) |
 | `server/` | **개발용 PC 도구** (운영 서버 아님): 영상 올려서 분석·확인 | ✅ 테스트 있음 |
 | `web/viewer/` | 2D 지도 뷰어 (재생, 꼬리, 선수 기록, 히트맵). 앱 웹뷰·공유용 | ✅ |
 | `app/` | Flutter 앱 (촬영 → 폰 안에서 검출 → 결과) | ⏳ 다음 단계 |
@@ -27,15 +28,16 @@
 
 ## 한 번에 돌리기
 
-세 폴더가 하나의 파이프라인으로 이어져 있습니다.
+팀원 폴더 세 개와 우리 코드가 하나의 파이프라인으로 이어져 있습니다.
 
 | 폴더 | 맡은 일 | 파이프라인에서 쓰는 방법 |
 |---|---|---|
 | `detection/` (차재혁) | 탐지 | `detect_person.py`를 진짜 YOLO 대신 가짜 `ultralytics`로 실행해서 모델·설정만 읽고(YOLO26x, conf 0.3, imgsz 1280, ByteTrack), 그 설정을 우리 영상에 그대로 돌립니다. 그 파일을 고치면 파이프라인도 바뀝니다. 파일 안의 YOLO 말고 다른 코드(파일 열기, print 등)는 그대로 실행됩니다 (`src/futsal/pipeline/yolo_track.py`) |
-| `calibration/` (HOGEUN) | 좌표 변환 | `court_map.py`의 `load`, `pixel_to_court`를 그대로 불러 씁니다 (카메라마다 가까운 쪽·먼 쪽 호모그래피 두 개). 우리 좌표(x 0~40, y 0~20 m)로는 x + 20, y + 10만 옮깁니다 (`src/futsal/nearfar.py`) |
+| `calibration/` (HOGEUN) | 좌표 변환 | `court_map.py`의 `load`(경기 전체 보정 `calibration/out/<회차>/calib_camN.json`), `homographies_at`, `pixel_to_court`를 그대로 불러 씁니다 (카메라마다 가까운 쪽·먼 쪽 호모그래피 두 개, 카메라가 움직인 구간마다 따로). 우리 좌표(x 0~40, y 0~20 m)로는 x + 20, y + 10만 옮깁니다 (`src/futsal/nearfar.py`) |
+| `ball_tracking/` (차재혁) | 공 | `track_ball.py`까지 따로 돌린 결과(CSV)를 `--ball`로 넘기면, 박스 아래 가운데 점을 선수와 같은 HOGEUN 보정·시계·두 카메라 정렬로 우리 좌표에 올려 `tracks.json`의 `ball`에 넣습니다. 두 카메라가 다 보면 검출이 예측보다 먼저, 그다음 가까운 카메라 하나를 고르고 평균은 내지 않습니다. 코트 밖 점도 지우지 않습니다. `to_court.py`는 쓰지 않습니다 (`src/futsal/pipeline/ball.py`) |
 | `src/futsal/` | 추적 | ReID, 시간 맞추기, 추적 v2, 이동거리·속도 |
 
-두 폴더는 모델 이름 한 줄(`yolo11m.pt` → `yolo26x.pt`) 말고 바꾸지 않았습니다. 돌릴 때도 두 폴더에 아무것도 쓰지 않습니다.
+`detection/`은 모델 이름 한 줄(`yolo11m.pt` → `yolo26x.pt`) 말고 바꾸지 않았고, `calibration/`과 `ball_tracking/`은 그대로입니다. 돌릴 때도 이 폴더들에 아무것도 쓰지 않습니다.
 
 **영상 두 개 → 추적 결과** (저장소 맨 위 폴더에서):
 
@@ -44,11 +46,13 @@ python -m futsal.trackview --video C:\Users\user\dev\futsal-videos\20261008_1709
     --offset 0 124.27 --start 600 --duration 180 --out trackview
 ```
 
-- 순서: 검출(모든 프레임) → ReID(초당 10장) → 좌표 변환 → 시간 맞추기(`--offset`, 10분 이상이면 선수 위치로 한 번 더) → 추적 v2
-- 결과: `tracks.json`(선수별 위치), `summary.json`(선수별 이동거리·속도, 쓴 검출 설정과 보정 파일), `events.csv`, `trackview.mp4`(확인 영상, `--no-video`면 안 만듦). 확인 영상에는 사람이 찍혀 있으니 저장소에 넣지 않습니다.
-- 10/8 영상은 기록된 카메라 움직임(cam1 2:40, cam2 46:13)을 자동으로 보정합니다. 10/8 영상인지는 파일 이름(`20261008_170919.mp4`, `20261008_171122.mp4`)이나 프레임 수로 알아봅니다. 보정 값은 HOGEUN 보정을 만든 프레임(파일의 `t_sec`, 지금 60초) 기준으로 계산합니다. 다른 영상은 카메라가 안 움직였다고 보고 계산하고, 그렇다고 화면에 알려 줍니다. `--auto-moves`(자동 감지)는 10/8 영상에서 틀린 움직임을 찾으니 쓰지 않습니다.
-- 카메라가 켜진 직후(cam1 약 20초, cam2 약 30초)와 부딪힌 직후(cam1 2:39~2:52, cam2 46:13~46:16)는 흔들리는 중이라 이 보정이 맞지 않습니다. 먼 쪽 위치가 몇 m 틀릴 수 있습니다. 53분 결과에는 cam2 처음 30초와 cam1 2:39~2:52가 들어 있습니다.
-- 시작 전에 확인합니다: 10/8 영상을 cam2, cam1 순서로 넣었거나 `--offset`·`--drift` 개수가 영상 수와 다르면 바로 멈춥니다. 다른 경기 영상이면 HOGEUN 보정이 그 영상으로 만든 것이 아니라고 알려 줍니다. 그때는 그 경기 영상으로 `calibration/`에서 다시 찍어야 합니다.
+- 순서: 검출(모든 프레임) → ReID(초당 10장) → 좌표 변환 → 시간 맞추기(`--offset`, 10분 이상이면 선수 위치로 한 번 더) → 추적 v2 → (`--ball`이면) 공
+- 결과: `tracks.json`(선수별 위치, `--ball`이면 공 위치), `summary.json`(선수별 이동거리·속도, 쓴 검출 설정과 보정 파일, 공 요약), `events.csv`, `trackview.mp4`(확인 영상, `--no-video`면 안 만듦). 확인 영상에는 사람이 찍혀 있으니 저장소에 넣지 않습니다.
+- 공: `ball_tracking/README.md` 순서대로 `track_ball.py`까지 돌린 CSV를 `--ball c1_track.csv c2_track.csv`로 넘깁니다(없는 카메라는 `-`). 공을 다른 파일로 돌렸으면(원본 대신 시작을 맞춘 `_sync` 사본 등) `--ball-video`에 그 파일을 적습니다. 두 파일은 시각이 잘라 낸 만큼 달라서, 같은 경기·같은 카메라가 아니면 검출 전에 멈춥니다. 공 CSV의 시각은 프레임 번호 ÷ fps라서, 프레임 간격이 고르지 않은 영상(11/3 cam1)에서는 최대 4.6초 어긋납니다. 이건 `ball_tracking/detect_video2.py`에서 프레임마다 실제 시각을 적도록 고쳐야 합니다.
+- 좌표 보정은 HOGEUN이 카메라 움직임을 따라가며 만든 경기 전체 보정(`calibration/out/<회차>/calib_camN.json`, 10/8과 11/3)을 씁니다. 카메라가 움직인 구간마다 호모그래피가 따로 있고, 구간 안에서 서서히 밀린 양도 30초마다 반영합니다.
+- 영상이 어느 경기의 몇 번 카메라인지는 파일 이름(원본 `20261008_170919.mp4`나 시작을 맞춘 `20261008_170919_sync.mp4`)이나 프레임 수로 그 경기의 `sync.json`에서 찾습니다. HOGEUN 보정은 시작을 맞춘 영상의 시각이라, 원본을 넣으면 잘라 낸 만큼(10/8 cam1 145.3초, cam2 21.0초) 시각을 옮겨 씁니다.
+- HOGEUN이 코트를 못 찾은 구간(카메라가 부딪힌 직후, 끝부분)과 맞춘 영상이 시작되기 전(원본 앞부분)은 좌표가 없고, 그 박스는 코트 밖으로 칩니다.
+- 시작 전에 확인합니다: 영상을 cam2, cam1 순서로 넣었거나 `--offset`·`--drift` 개수가 영상 수와 다르면 바로 멈춥니다. 보정이 없는 경기 영상이면 10/8 한 장면 보정을 그대로 쓰면서, 그 영상으로 만든 보정이 아니라고 알려 줍니다. 그때는 그 경기 영상으로 `calibration/`에서 다시 찍어야 합니다.
 - `detection/`, `calibration/` 폴더를 저장소에서 바로 읽기 때문에 `pip install -e`(저장소 안에서 설치)로 설치해야 합니다.
 - 처리 시간: 1분 구간에 약 9분 (RTX 2070 SUPER, 다른 작업과 같이 돌린 값. 검출 cam1 5.5분 + cam2 3분, 확인 영상 1분). ByteTrack이 모든 프레임을 봐야 해서, 초당 10장만 검출하던 예전보다 cam1(60fps)은 6배, cam2(30fps)는 3배 검출이 많습니다.
 
@@ -59,6 +63,7 @@ python experiments/full_match.py --out experiments/full_match_team
 ```
 
 - 좌표 변환은 `calibration/`입니다. 검출은 `detection/`이 아니라 이미 만들어 둔 `experiments/cache_full26`(우리 `experiments/build_cache.py`: YOLO26x, conf 0.1, 초당 10장)입니다. 53분 전체를 `detection/`로 다시 검출하지는 않았습니다.
+- 공을 같이 넣으려면 `--ball c1_track.csv c2_track.csv --ball-video <공을 돌린 영상 두 개>`를 붙입니다. 차재혁 님의 10/8 결과는 시작을 맞춘 `_sync` 사본으로 만든 것이고, 이 명령의 선수는 원본으로 돌리니 `--ball-video`에 사본을 적어야 합니다.
 - 추적만 약 9~10분 걸립니다.
 
 **우리가 검증한 결과와 다른 점** (10/8 영상 10:00부터 1분. 숫자는 앞이 `detection/`, 뒤가 우리 검출. 박스는 같은 프레임에 우리 검출(YOLO26x, conf 0.1)을 다시 돌려 비교):
@@ -69,7 +74,7 @@ python experiments/full_match.py --out experiments/full_match_team
 - 같은 검출 결과로 다시 돌리면 추적 결과도 같습니다. 처음 돌릴 때도 저장된 검출 결과(ReID 특징은 float16)를 다시 읽어서 추적하기 때문입니다. 예전에는 처음 돌릴 때만 float32 특징을 써서, 20:00부터 3분 구간에서 처음 결과(절반 넘게 보인 ID 10개, 사건 3건)와 다시 돌린 결과(9개, 4건)가 달랐습니다. 반올림 정도의 차이로도 결과가 바뀌니, 짧은 구간 하나의 비교는 조심해서 봐야 합니다.
 - 추적 v2의 설정과 [추적 v2](docs/tracking-v2.md)의 숫자는 우리 검출(conf 0.1)과 우리 탭 보정으로 맞추고 잰 값입니다.
 
-**보정 비교** (53분, 같은 검출 `cache_full26`, 같은 추적):
+**보정 비교** (53분, 같은 검출 `cache_full26`, 같은 추적. 11/11 이전에 잰 값으로, `calibration/` 열은 HOGEUN의 예전 한 장면 보정입니다):
 
 | | 우리 탭 보정 (`calib/`) | 우리 탭 보정 + 새로 잰 카메라 움직임 | `calibration/` (HOGEUN) |
 |---|---|---|---|
@@ -81,7 +86,7 @@ python experiments/full_match.py --out experiments/full_match_team
 - 라벨 없는 지표 비교입니다. 정답 위치가 없어서 어느 보정이 더 정확한지는 아직 모릅니다. 첫 열은 기존 `experiments/full_match26` 결과와 숫자가 같습니다.
 - ID 수와 사건 수는 따로 보는 지표가 아닙니다. 6분 창이 이어지는 10곳에서 새 ID가 첫 열 20개, HOGEUN 쪽 14개 생기고(12 + 20 = 32, 12 + 14 = 26), 사건 33번 중 27번, 21번 중 17번이 경기 중간에 새로 생긴 ID의 것입니다.
 - `summary.json`의 최고 속도는 아직 믿기 어렵습니다. 두 보정 모두 10 m/s가 넘는 값은 전부 6분 창 이음매 하나(17:35, 1055초 근처)에서 나옵니다 (첫 열 20.4 m/s, HOGEUN 쪽 14.3 m/s). 추적이 박스 없이 3초까지 메워 넣은 구간에서도 높은 속도가 나올 수 있습니다 (20:00부터 3분 구간의 8.7 m/s). 추적 v2 쪽 문제라 이번에 고치지 않았습니다.
-- `calibration/`은 60초 화면으로 만든 보정이라, cam1은 2:40 이후 (-5.8, -9.2) px, cam2는 46:13 이후 (+12.2, -1.3) px 옮겨 씁니다 (측정 방법은 `src/futsal/nearfar.py`).
+- 표의 `calibration/` 열은 60초 화면 한 장으로 만든 예전 보정에 cam1은 2:40 이후 (-5.8, -9.2) px, cam2는 46:13 이후 (+12.2, -1.3) px 옮겨 쓴 결과입니다 (측정 방법은 `src/futsal/nearfar.py`). 지금은 HOGEUN의 경기 전체 시간별 보정(11/11)을 쓰고, 같은 명령의 결과는 ID 24개, 절반 넘게 / 80% 넘게 보인 ID 7 / 6개, 한가운데서 생기거나 끊긴 ID 17번(분당 0.32), 두 카메라 위치 차 0.83 → 0.184 m입니다 (`experiments/full_match_1111`, 추적 코드도 그사이 바뀌어서 표와 바로 비교하지는 않습니다).
 - 첫 열의 카메라 움직임 값(`experiments/full_match.py`의 `KNOCKS`, cam1 2:40 전 (41, 19) px, cam2 46:13 뒤 (13.8, 1.3) px)은 예전 값입니다. 부딪힌 지 1.5초 뒤에 잰 값인데, cam1은 그때 아직 흔들리는 중이었습니다. 이번에 흔들림이 멎은 뒤 잰 값(cam1 (5.8, 9.2) px, cam2 (12.2, -1.3) px, `nearfar.POSES_20261008`)과 cam1은 35 px 넘게, cam2는 3 px 정도 다릅니다. 가운데 열은 같은 탭 보정에 이번 값을 쓴 결과입니다 (임시 복사본으로 돌림, 저장소 코드는 예전 값 그대로). 움직임 값만 바꿔도 ID가 32개에서 29개로 줄어서, 보정끼리의 차이 중 일부는 이 값 때문입니다.
 
 **예전 방식으로 되돌리기:** 우리 검출(`pipeline/detect.py`)과 우리 탭 보정(`calib/<cam>/calib.json`)을 부르던 줄은 `src/futsal/trackview.py`, `experiments/full_match.py`에 주석으로 남겨 두었습니다. 주석에 적힌 대로 풀면 됩니다. 어느 쪽을 기본으로 할지는 팀이 정합니다.
@@ -118,5 +123,5 @@ python -m futsal.sim accuracy --hfov 67.3                              # 합성 
 - [선수 ID 추적: 기존 방법 조사와 우리 선택](docs/tracking-survey.md)
 - [추적 v2: 방법, 결과, 알게 된 것 (10/8 실제 영상)](docs/tracking-v2.md)
 - [추적 결과 영상 만들기 (실제 영상, 한 번에 돌리기)](docs/tracking-check.md)
-- [공 검출: 학습 계획과 도구 (라벨링·Colab 학습·조각 검출)](docs/ball-detection.md)
+- [공 검출: 예전 도구 `src/futsal/ball` 기록 (지금 공 단계는 `ball_tracking/README.md`)](docs/ball-detection.md)
 - [2026-10-08 테스트 촬영 기록 (영상 점검·시간 맞추기 결과)](docs/capture-2026-10-08.md)

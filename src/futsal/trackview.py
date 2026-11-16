@@ -6,13 +6,17 @@
   검출       detection/detect_person.py (차재혁) 의 모델·설정 (YOLO26x, conf 0.3, ByteTrack) 을 그대로 읽어서 모든
              프레임에 돌림 (pipeline/yolo_track.py). 추적에는 초당 --rate 장만 씀
   ReID       pipeline/reid.py (OSNet), 추적에 쓰는 프레임의 박스마다
-  좌표 변환  calibration/ (HOGEUN) 의 court_map.load / pixel_to_court 를 그대로 부르고 우리 좌표(0~40, 0~20 m)로 옮김
-             (futsal/nearfar.py). 10/8 영상은 기록된 카메라 움직임을 자동 보정, 다른 영상은 --auto-moves
+  좌표 변환  calibration/ (HOGEUN) 의 court_map 을 그대로 부르고 우리 좌표(0~40, 0~20 m)로 옮김 (futsal/nearfar.py).
+             영상이 속한 경기(calibration/out/<경기>/sync.json)의 경기 전체 시간별 보정 calib_cam<N>.json 을 영상
+             시각에 맞춰 씀 (카메라가 움직여도 HOGEUN이 따라감, 코트를 못 찾은 구간은 좌표 없음). 그 파일이 없으면
+             한 프레임 보정 H_cam<N> + 10/8 기록된 카메라 움직임, 또는 --auto-moves
   시간 맞추기 --offset (python -m futsal.sync 결과). 10분 이상이면 선수 위치로 두 폰 시계 어긋남을 한 번 더 보정
   추적       추적 v2 (아래 --ids)
+  공         --ball: ball_tracking/ (차재혁) 의 track_ball.py 결과를 선수와 같은 보정·시계·카메라 정렬로 지도에 올림
+             (pipeline/ball.py; ball_tracking/to_court.py 는 쓰지 않음)
 
 결과 (--out 폴더):
-  tracks.json    선수별 위치 (web/viewer 로 재생 가능)
+  tracks.json    선수별 위치, --ball 이면 공 위치도 (web/viewer 로 재생 가능)
   summary.json   선수별 이동거리·속도·보인 비율, 쓴 검출 설정과 보정 파일
   events.csv     ID가 경기장 한가운데서 새로 생기거나 끊긴 순간 (= ID가 바뀌었을 가능성이 큰 곳) 목록
   trackview.mp4  확인 영상. 위: 두 카메라 화면에 선수 ID, 아래: 2D 지도 + ID 사건 목록 (--no-video 면 안 만듦)
@@ -51,6 +55,7 @@ from .court import Court
 from .homography import Calibration, CalibrationTimeline, calibration_at, timeline_from_json
 from .pipeline import detect, yolo_track
 from .pipeline.align import corrected_sync
+from .pipeline.ball import ball_track, clock_shift, read_track
 from .pipeline.run import IDS, LINKERS, build_tracks
 from .tracks import TrackSet
 
@@ -75,15 +80,41 @@ def load_calibration(path: str, video: str | None = None, auto_moves: bool = Fal
     return cal
 
 
+def team_calib_dir(video: str | None) -> str:
+    """HOGEUN's folder for `video`: calibration/out/<match> of the match it belongs to (nearfar.find_video), else the
+    10/8 folder (nearfar.TEAM_OUT)."""
+    found = nearfar.find_video(video) if video else None
+    return found[0] if found else str(nearfar.TEAM_OUT)
+
+
 def load_team_calibration(n: int, video: str | None = None, auto_moves: bool = False, cache_dir: str | None = None,
-                          out_dir: str = str(nearfar.TEAM_OUT)) -> Calibration | CalibrationTimeline:
-    """Camera n of HOGEUN's calibration (calibration/court_map.load: H_cam<n>_refined.json, else H_cam<n>.json in
-    `out_dir`) in our pitch coordinates (futsal.nearfar). Camera knocks: with `auto_moves` futsal.camshift measures
-    them against its frame (t_sec), as load_calibration does for a tapped one; otherwise the measured poses of the 10/8
-    test videos are used when `video` is one of them (nearfar.known_knocks, relative to t_sec), and none for other
-    videos (with a notice)."""
+                          out_dir: str | None = None) -> Calibration | CalibrationTimeline:
+    """Camera n of HOGEUN's calibration in our pitch coordinates (futsal.nearfar). `out_dir` defaults to the folder of
+    the match `video` belongs to (team_calib_dir). For a video of that match with HOGEUN's whole-match file
+    (calib_cam<n>.json) it is that timeline on the video's own clock (nearfar.team_timeline): he followed the camera, so
+    no knocks are added. Otherwise the single-frame calibration (H_cam<n>_refined.json, else H_cam<n>.json) with
+    camera knocks: with `auto_moves` futsal.camshift measures them against its frame (t_sec), as load_calibration does
+    for a tapped one; otherwise the measured poses of the 10/8 test videos are used when `video` is one of them
+    (nearfar.known_knocks, relative to t_sec), and none for other videos (with a notice). t_sec is moved onto `video`'s
+    clock when HOGEUN clicked another file of the same camera (since 11/11 the start-aligned copy)."""
+    found = nearfar.find_video(video) if video else None
+    if found is not None and found[1] != n:           # videos given in the wrong order: cam1's calibration on cam2's video
+        raise ValueError(f"{nearfar.file_name(video)} 은 {os.path.basename(found[0])} 경기 cam{found[1]} 영상인데 cam{n} "
+                         "자리에 들어왔습니다 (--video 는 cam1 영상, cam2 영상 순서)")
+    out_dir = out_dir or team_calib_dir(video)
+    same = found is not None and os.path.normcase(os.path.abspath(out_dir)) == os.path.normcase(os.path.abspath(found[0]))
+    if same and os.path.exists(nearfar.tracked_file(n, out_dir)):
+        tl = nearfar.team_timeline(n, out_dir, found[2])
+        print(f"  {nearfar.file_name(video)}: HOGEUN 시간별 보정 {_rel(nearfar.tracked_file(n, out_dir))} "
+              f"(영상 시각 = 보정 시각 + {found[2]:.3f}초, 코트를 못 찾은 구간은 좌표 없음)"
+              + (" --auto-moves 는 쓰지 않습니다" if auto_moves else ""))
+        return tl
     cal = nearfar.load_team(n, out_dir)
     at_s = cal.team.get("t_sec")
+    made = nearfar.find_video(cal.team["video"]) if cal.team.get("video") else None
+    same_cam = found is not None and made is not None and made[:2] == found[:2]   # he clicked another file of this camera
+    if at_s is not None and same_cam:
+        at_s = float(at_s) - made[2] + found[2]       # his t_sec onto our video's clock
     cam = nearfar.camera_20261008(video) if video else None
     if cam is not None and cam != f"cam{n}":          # videos given in the wrong order: cam1's calibration on cam2's video
         raise ValueError(f"{nearfar.file_name(video)} 은 10/8 경기 {cam} 영상인데 cam{n} 자리에 들어왔습니다 "
@@ -95,7 +126,7 @@ def load_team_calibration(n: int, video: str | None = None, auto_moves: bool = F
             print(f"  {nearfar.file_name(video)}: 기록된 카메라 움직임이 없어 촬영 내내 카메라가 그대로였다고 보고 계산합니다"
                   " (움직였으면 --auto-moves)")
             made_on = nearfar.file_name(cal.team.get("video", ""))
-            if cam is None and made_on and made_on != nearfar.file_name(video):
+            if cam is None and made_on and made_on != nearfar.file_name(video) and not same_cam:
                 print(f"  주의: 이 보정은 HOGEUN이 {made_on} 영상에서 찍은 것입니다. 다른 경기이거나 카메라 자리가 바뀌었으면"
                       " calibration/ 에서 그 영상으로 다시 찍어야 합니다")
         return cal
@@ -157,15 +188,21 @@ class FrameReader:
 
 def find_events(ts: TrackSet, court: Court, edge_m: float = 2.5, settle_s: float = 2.0) -> list[dict]:
     """IDs that start or end in the middle of the pitch (not at the window edges, not at the touchlines where
-    players really come and go): the likely places where an identity was lost or swapped."""
+    players really come and go): the likely places where an identity was lost or swapped. The window edges are the
+    first and last frames anyone has a position (a stretch without calibration at either end is no ID change)."""
     ev = []
-    n, fps = ts.n_frames, ts.fps
+    fps = ts.fps
+    on = [np.flatnonzero(np.all(np.isfinite(p.xy), axis=1)) for p in ts.players]
+    on = [s for s in on if len(s)]
+    if not on:
+        return ev
+    first, last = min(int(s[0]) for s in on), max(int(s[-1]) for s in on)
     for p in ts.players:
         seen = np.where(np.all(np.isfinite(p.xy), axis=1))[0]
         if len(seen) == 0:
             continue
         for kind, k in (("new", int(seen[0])), ("lost", int(seen[-1]))):
-            if (kind == "new" and k < settle_s * fps) or (kind == "lost" and k > n - 1 - settle_s * fps):
+            if (kind == "new" and k < first + settle_s * fps) or (kind == "lost" and k > last - settle_s * fps):
                 continue
             x, y = p.xy[k]
             if min(x, y, court.length - x, court.width - y) < edge_m:
@@ -289,6 +326,10 @@ def render(out_path: str, videos: dict[str, str], cals: dict, offsets: dict, ts:
             (x, y), = P(xy)
             cv2.circle(m, (int(x), int(y)), 8, color_of(pid), -1, cv2.LINE_AA)
             cv2.putText(m, str(pid), (int(x) + 9, int(y) - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+        if ts.ball is not None and k < len(ts.ball) and np.all(np.isfinite(ts.ball[k])):
+            (x, y), = P(ts.ball[k])
+            cv2.circle(m, (int(x), int(y)), 6, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(m, (int(x), int(y)), 6, (0, 0, 0), 1, cv2.LINE_AA)
         for e in events:
             if 0 <= t_rel - e["t"] < 2.5:            # flash the event for 2.5 s
                 (x, y), = P([e["x"], e["y"]])
@@ -315,14 +356,16 @@ def render(out_path: str, videos: dict[str, str], cals: dict, offsets: dict, ts:
 
 def run(videos: dict[str, str], cals: dict, offsets: dict[str, tuple[float, float]], start: float, duration: float,
         out_dir: str, detector_factory, court: Court, rate_hz: float = 10.0, fps_out: float = 10.0,
-        det_tag: str = "", embedder=None, ids: str = "v2", video: bool = True, summary: dict | None = None) -> dict:
+        det_tag: str = "", embedder=None, ids: str = "v2", video: bool = True, summary: dict | None = None,
+        ball: dict[str, str] | None = None, ball_videos: dict[str, str] | None = None) -> dict:
     """Detect (cached per camera), track with build_tracks(ids=...), write tracks.json / events.csv / summary.json and,
     with `video`, trackview.mp4. `detector_factory(cam)` gives the camera's detector, which sees every frame of the
     window in order (pipeline.yolo_track.detection_tracker: detection/'s YOLO + ByteTrack; a plain detect.Detector
     works too); its boxes are kept at `rate_hz` (yolo_track.track_video). `embedder` (pipeline.reid.reid_embedder)
     adds a ReID embedding to every kept box, which ids="v2" / "v2gta" need; without it they fall back to
     "appearance". The detection cache key is `det_tag` plus whether ReID was computed. `summary` (optional) goes into
-    summary.json next to the run's own numbers (per-player distance, speed, time seen)."""
+    summary.json next to the run's own numbers (per-player distance, speed, time seen). `ball` {camera: track_ball.py
+    CSV} (made from `ball_videos` {camera: video}, default the camera's own video) adds the ball (pipeline.ball)."""
     os.makedirs(out_dir, exist_ok=True)
     tag = det_tag + ("+reid" if embedder is not None else "")
     dets = {}
@@ -331,7 +374,7 @@ def run(videos: dict[str, str], cals: dict, offsets: dict[str, tuple[float, floa
         s_cam = (start - off) / (1 + drift)
         cache = os.path.join(out_dir, f"det_{cam}.json")
         want = {"video": nearfar.file_name(path), "start": round(s_cam, 3), "duration": duration, "rate": rate_hz, "tag": tag}
-        # the file size tells two videos of the same name apart (HOGEUN's are camera1.mp4 / camera2.mp4 for any match);
+        # the file size tells two videos of the same name apart (say camera1.mp4 of two matches);
         # a cache written before it was recorded still counts
         size = os.path.getsize(path) if os.path.isfile(path) else None
         if os.path.exists(cache):
@@ -371,6 +414,10 @@ def run(videos: dict[str, str], cals: dict, offsets: dict[str, tuple[float, floa
         xy[:m] = p.xy[:m]
         p.xy = xy
     ts.players = [p for p in ts.players if np.any(np.isfinite(p.xy[:, 0]))]
+    ball_rec = None
+    if ball:                                               # the players' calibration, corrected clock and alignment
+        ts.ball, ts.ball_cam, ball_rec = ball_track(ball, ball_videos or {}, videos, cals, offsets, start, rate_hz, n, al, court)
+        print(f"  공: 프레임 {ball_rec['frames_with_ball']:.0%}에 위치 (카메라별 {ball_rec['from_camera']})")
     ts.start = start
     ts.compute_stats()
     ts.dump(os.path.join(out_dir, "tracks.json"))
@@ -387,6 +434,7 @@ def run(videos: dict[str, str], cals: dict, offsets: dict[str, tuple[float, floa
               **{k: res[k] for k in ("tracker", "detections", "ids", "ids_over_half", "events")},
               "tracklets": info.get("tracklets"), "clock": clk,
               "alignment": al and {k: al[k] for k in ("pairs", "median_before_m", "median_after_m") if k in al},
+              **({"ball": ball_rec} if ball_rec else {}),
               "players": [{"id": p.id, "team": p.team, "seen_share": round(seen[p.id], 3), **p.stats} for p in ts.players]}
     with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(record, f, ensure_ascii=False, indent=1, default=str)
@@ -411,6 +459,11 @@ def calibration_record(n: int, cal: Calibration | CalibrationTimeline, out_dir: 
     if not isinstance(tl[0][1], nearfar.NearFarCalibration):
         return {"file": _rel(tapped) if tapped else None, "timeline": [{"from_s": t} for t, _ in tl]}
     team = tl[0][1].team
+    if "source" in team:                                   # nearfar.team_timeline: HOGEUN's whole-match file
+        return {"file": _rel(nearfar.tracked_file(n, out_dir)), "video": nearfar.file_name(team.get("video", "")),
+                "t_sec": team.get("t_sec"),
+                "timeline": [{"from_s": round(t, 3), "source": c.team["source"], "resolved": c.resolved,
+                              "drift_px": [round(v, 2) for v in c.shift]} for t, c in tl]}
     return {"file": _rel(nearfar.team_file(n, out_dir)), "video": nearfar.file_name(team.get("video", "")),
             "t_sec": team.get("t_sec"),
             "timeline": [{"from_s": t, "shift_px": [round(v, 2) for v in c.shift]} for t, c in tl]}
@@ -422,8 +475,9 @@ def main(argv=None):
     # To switch back to our tapped calib/<cam>/calib.json: uncomment --calib, its check and load_calibration below
     # (and drop the H_cam file check and the load_team_calibration lines); summary.json then names those files.
     # ap.add_argument("--calib", nargs="+", required=True, help="영상마다 calib.json (python -m futsal.calibtool)")
-    ap.add_argument("--team-calib", default=str(nearfar.TEAM_OUT), metavar="DIR",
-                    help="HOGEUN 좌표 변환 결과 폴더 (기본 calibration/out). 카메라 N은 H_camN_refined.json, 없으면 H_camN.json")
+    ap.add_argument("--team-calib", default=None, metavar="DIR",
+                    help="HOGEUN 좌표 변환 결과 폴더 (기본: 영상 이름으로 calibration/out/<회차> 를 찾고, 모르는 영상이면 "
+                         "calibration/out/1008). 그 회차 영상이면 calib_camN.json (시간별), 아니면 H_camN_refined.json, H_camN.json")
     ap.add_argument("--offset", nargs="+", type=float, default=None, help="영상마다 시간 차 (cam1은 0, cam2는 futsal.sync 결과)")
     ap.add_argument("--drift", nargs="+", type=float, default=None)
     ap.add_argument("--start", type=float, required=True, help="cam1 영상 기준 시작 초")
@@ -437,6 +491,10 @@ def main(argv=None):
     ap.add_argument("--no-reid", action="store_true", help="ReID 계산을 건너뛰고 예전 방식(appearance)으로 추적")
     ap.add_argument("--auto-moves", action="store_true", help="카메라가 움직인 순간을 자동으로 찾아 보정 (futsal.camshift)")
     ap.add_argument("--no-video", action="store_true", help="확인 영상(trackview.mp4)을 만들지 않음")
+    ap.add_argument("--ball", nargs="+", default=None, metavar="CSV",
+                    help="공: 카메라마다 ball_tracking/track_ball.py 결과 (cam1 [cam2], 없는 카메라는 -)")
+    ap.add_argument("--ball-video", nargs="+", default=None, metavar="VIDEO",
+                    help="--ball 을 만든 영상 (기본: --video). 원본과 시작을 맞춘 사본(_sync)처럼 다르면 꼭 지정")
     ap.add_argument("--out", default="trackview")
     a = ap.parse_args(argv)
     # if len(a.calib) != len(a.video):
@@ -446,9 +504,10 @@ def main(argv=None):
             ap.error(f"{opt} 는 --video 와 개수가 같아야 합니다 (영상마다 하나)")
     if a.duration <= 0 or a.rate <= 0:
         ap.error("--duration 과 --rate 는 0보다 커야 합니다")
-    for i in range(len(a.video)):
-        if not os.path.exists(nearfar.team_file(i + 1, a.team_calib)):
-            ap.error(f"{a.team_calib} 에 cam{i + 1} 보정 파일(H_cam{i + 1}.json)이 없습니다")
+    calib_dirs = [a.team_calib or team_calib_dir(v) for v in a.video]
+    for i, d in enumerate(calib_dirs):
+        if not os.path.exists(nearfar.team_file(i + 1, d)):
+            ap.error(f"{d} 에 cam{i + 1} 보정 파일(H_cam{i + 1}.json)이 없습니다")
     names = [f"cam{i + 1}" for i in range(len(a.video))]
     offs = a.offset or [0.0] * len(names)
     drifts = a.drift or [0.0] * len(names)
@@ -457,13 +516,25 @@ def main(argv=None):
     videos = dict(zip(names, a.video))
     # cals = {n: load_calibration(c, v, a.auto_moves, a.out) for n, c, v in zip(names, a.calib, a.video)}
     try:
-        cals = {n: load_team_calibration(i + 1, v, a.auto_moves, a.out, a.team_calib) for i, (n, v) in enumerate(videos.items())}
+        cals = {n: load_team_calibration(i + 1, v, a.auto_moves, a.out, calib_dirs[i]) for i, (n, v) in enumerate(videos.items())}
     except ValueError as e:                                # a 10/8 video in the other camera's place
         ap.error(str(e))
     team = any(isinstance(c[0][1] if isinstance(c, list) else c, nearfar.NearFarCalibration) for c in cals.values())
     if team and (court.length, court.width) != (40.0, 20.0):     # calibration/court.py: L, W = 40, 20
         ap.error("calibration/ (HOGEUN) 좌표 변환은 40x20 코트만 됩니다 (--court 40x20)")
     offsets = {n: (o, d) for n, o, d in zip(names, offs, drifts)}
+    if len(a.ball or []) > len(names) or (a.ball_video and len(a.ball_video) != len(a.ball or [])):
+        ap.error("--ball 은 영상 수까지, --ball-video 는 --ball 과 같은 개수로 주세요")
+    ball = {n: p for n, p in zip(names, a.ball or []) if p != "-"}
+    ball_videos = {n: v for n, v in zip(names, a.ball_video or []) if v != "-"}
+    for n, p in ball.items():                              # before hours of detection, not after
+        if not os.path.isfile(p):
+            ap.error(f"공 결과 파일이 없습니다: {p}")
+        try:
+            read_track(p)
+            clock_shift(ball_videos.get(n, videos[n]), videos[n])
+        except ValueError as e:
+            ap.error(str(e))
     ids = "appearance" if a.no_reid and a.ids in LINKERS else a.ids
     embedder = None
     if ids in LINKERS:
@@ -474,7 +545,7 @@ def main(argv=None):
             print(f"ReID를 쓸 수 없어 예전 방식(appearance)으로 추적합니다: {e}")
             ids = "appearance"
     tapped = getattr(a, "calib", None) or [None] * len(names)      # a.calib exists only with --calib uncommented
-    summary = {"calibration": {n: calibration_record(i + 1, cals[n], a.team_calib, tapped[i]) for i, n in enumerate(videos)}}
+    summary = {"calibration": {n: calibration_record(i + 1, cals[n], calib_dirs[i], tapped[i]) for i, n in enumerate(videos)}}
     # To switch back to our detector (pipeline/detect.py): uncomment these, --model/--conf above, detect_video in run(),
     # and drop the settings / print / summary["detection"] / run(...) lines below them (one run() call only).
     # conf = a.conf if a.conf is not None else (0.1 if ids in LINKERS else 0.3)
@@ -486,7 +557,7 @@ def main(argv=None):
     summary["detection"] = {"file": _rel(settings["file"]), "model": settings["model"], "track": yolo_track.track_kwargs(settings)}
     res = run(videos, cals, offsets, a.start, a.duration, a.out, lambda cam: yolo_track.detection_tracker(settings),
               court, a.rate, det_tag=yolo_track.tag(settings), embedder=embedder, ids=ids, video=not a.no_video,
-              summary=summary)
+              summary=summary, ball=ball or None, ball_videos=ball_videos)
     print(f"\n추적 방식 {res['tracker']}: ID {res['ids']}개 (구간 절반 이상 보인 ID {res['ids_over_half']}개), "
           f"경기장 한가운데서 생기거나 끊긴 ID {res['events']}건")
     outs = ["tracks.json", "summary.json", "events.csv"] + ([] if a.no_video else ["trackview.mp4"])

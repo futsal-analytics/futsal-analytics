@@ -1,16 +1,23 @@
 """HOGEUN's court calibration (calibration/ in this repository) as the pipeline's Calibration.
 
-calibration/ gives each camera two homographies (calibration/calibrate.py, refine.py): H_near for the camera's own
-half, from 5 clicks, and H_far beyond the halfway line, fitted to the white lines and tied to H_near so that both send
-the halfway line to the same pixels. calibration/court_map.py maps pixels to court metres with them (load,
-pixel_to_court). NearFarCalibration runs that code as it is and adds what the pipeline needs on top: our pitch
-coordinates, the inverse map (drawing only), the metres-per-pixel scale, camera knocks (shifted) and JSON for
-calibration timelines. Nothing in calibration/ is changed or written.
+calibration/ gives each camera two homographies (calibration/calib_core.py, refine.py): H_near for the camera's own
+half and H_far beyond the halfway line, tied so that both send the halfway line to the same pixels.
+calibration/court_map.py maps pixels to court metres with them (pixel_to_court). NearFarCalibration runs that code as
+it is and adds what the pipeline needs on top: our pitch coordinates, the inverse map (drawing only), the
+metres-per-pixel scale, camera knocks (shifted) and JSON for calibration timelines. Nothing in calibration/ is changed
+or written.
+
+One folder per match: calibration/out/<match>/ (1008, 1103; calib_core.match_dir) holds the single-frame calibration
+H_cam<N>[_refined].json (load_team), the whole-match calibration calib_cam<N>.json that calibration/track.py made by
+following the camera (team_timeline: one homography pair per stretch, the slow drift inside it, NaN where the court was
+not found) and sync.json. HOGEUN's files are on the clock of the start-aligned copies (<name>_sync.mp4,
+court_map.load); a run on the original video gets the same calibration later by the cut (find_video).
 
 Coordinates. HOGEUN's (calibration/court.py): origin at the centre spot, x along the court towards the goal cam1 faces
 ("east", x = +20), y towards cam1's left sideline (y = +10), metres. Ours (futsal.court): origin at corner_bl, x 0..length,
-y 0..width. cam1 stands outside our corner (0, 0) facing the x = length goal and cam2 at the opposite corner, so the
-axes agree and the map is a pure translation (no rotation, no flip):
+y 0..width. cam1 faces the x = length goal from outside our corner (0, 0) on 10/8 and (0, 20) on 11/3, cam2 from the
+diagonal corner (HOGEUN's "mirror" on 11/3 only renames his click targets: his frame stays right-handed), so the axes
+agree and the map is a pure translation (no rotation, no flip):
 
     x_ours = x_team + length / 2,   y_ours = y_team + width / 2
 
@@ -18,17 +25,19 @@ Found on the 10/8 videos: of the 8 axis-aligned maps with a fitted translation t
 calibration best for both cameras (translation within 0.3 m of (20, 10), the next map 3.5 m or more off), and
 HOGEUN's clicks land on our keypoints of the same marks (tests/test_nearfar.py).
 
-Loading calibration/ code. court_map.py imports its neighbours as top-level modules (`from calibrate import
-HALF_SIGN`, and calibrate imports `court`). It is loaded by file path once, with calibration/ on sys.path for the
-import only and bytecode writing off (no __pycache__ inside calibration/); court_map, calibrate and court are then
-removed from sys.modules (any module of the same name that was there before is put back), so these names cannot
-shadow anything. The functions keep working through their own module globals.
+Loading calibration/ code. court_map.py imports its neighbours as top-level modules (`from calib_core import
+HALF_SIGN, match_dir`, and calib_core imports `court`). It is loaded by file path once, with calibration/ on sys.path
+for the import only and bytecode writing off (no __pycache__ inside calibration/); court_map, calib_core and court are
+then removed from sys.modules (any module of the same name that was there before is put back), so these names cannot
+shadow anything. The functions keep working through their own module globals; their file reads get UTF-8
+(_utf8_open).
 """
 from __future__ import annotations
 
 import importlib.util
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -42,8 +51,9 @@ from .homography import Calibration, CalibrationTimeline, image_to_pitch
 
 REPO = Path(__file__).resolve().parents[2]
 TEAM_DIR = REPO / "calibration"          # HOGEUN's folder (only read)
-TEAM_OUT = TEAM_DIR / "out"              # H_cam<N>.json (5 clicks) and H_cam<N>_refined.json (white lines)
-TOP_LEVEL = ("court_map", "calibrate", "court")    # what importing court_map.py pulls in as top-level modules
+MATCHES = TEAM_DIR / "out"               # one folder per match (calib_core.match_dir)
+TEAM_OUT = MATCHES / "1008"              # the 10/8 match, calib_core.DEFAULT_MATCH
+TOP_LEVEL = ("court_map", "calib_core", "court")    # what importing court_map.py pulls in as top-level modules
 
 # Camera poses of the 10/8 test videos: [(from_s on the camera's own clock, (dx, dy) px the picture is slid against a
 # reference frame)], one row per settled stretch. A calibration made on the frame at t (HOGEUN's t_sec) gets the knocks
@@ -68,6 +78,14 @@ VIDEOS_20261008 = {"cam1": ("20261008_170919.mp4", 198967), "cam2": ("20261008_1
 _court_map: ModuleType | None = None
 
 
+def _utf8_open(file, mode="r", *args, **kwargs):
+    """open() for court_map.py: it reads its JSON without an encoding, which is cp949 on Korean Windows, and
+    calibration/out/1103/sync.json has Korean notes (UTF-8, as on Linux)."""
+    if "b" not in mode and "encoding" not in kwargs and len(args) < 2:
+        kwargs["encoding"] = "utf-8"
+    return open(file, mode, *args, **kwargs)
+
+
 def load_court_map(folder: str | os.PathLike = TEAM_DIR) -> ModuleType:
     """calibration/court_map.py as a module object (see the module docstring for what is and is not left behind)."""
     folder = str(folder)
@@ -81,6 +99,7 @@ def load_court_map(folder: str | os.PathLike = TEAM_DIR) -> ModuleType:
             raise ImportError(f"no court_map.py in {folder}")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        mod.open = _utf8_open
     finally:
         sys.path.remove(folder)
         sys.path_importer_cache.pop(folder, None)
@@ -123,6 +142,7 @@ class NearFarCalibration(Calibration):
     team: dict
     centre: tuple[float, float] = (20.0, 10.0)      # HOGEUN's origin in our coordinates
     shift: tuple[float, float] = (0.0, 0.0)         # (dx, dy) px of the knocks applied since HOGEUN's frame (record only)
+    resolved: bool = True                           # False: HOGEUN found no court then (to_pitch NaN; drawing still works)
 
     @property
     def sign(self) -> int:
@@ -143,6 +163,8 @@ class NearFarCalibration(Calibration):
         uv = np.asarray(uv, np.float64).reshape(-1, 2)
         if not len(uv):
             return np.zeros((0, 2))
+        if not self.resolved:                            # as court_map.pixel_to_court in an unresolved stretch
+            return np.full((len(uv), 2), np.nan)
         xy = court_map().pixel_to_court(self.team, uv).astype(np.float64) + self.centre
         xy[~np.isfinite(uv).all(1)] = np.nan          # cv2 would put a NaN pixel on the centre spot, in court
         return xy
@@ -180,39 +202,123 @@ class NearFarCalibration(Calibration):
         """Calibration's keys (H: the near half) plus H_far in our coordinates and HOGEUN's calibration itself, which
         from_json rebuilds the camera from."""
         return {**super().to_json(), "H_far": self.H_far.tolist(), "centre": list(self.centre), "shift_px": list(self.shift),
-                "team": self.team}
+                "resolved": self.resolved, "team": self.team}
 
     @classmethod
     def from_json(cls, d: dict) -> "NearFarCalibration":
-        """Our to_json, or one of HOGEUN's calibration/out/H_cam<N>[_refined].json files (they have "H_near")."""
+        """Our to_json, or one of HOGEUN's single-frame calibration/out/<match>/H_cam<N>[_refined].json files (they have
+        "H_near"; his whole-match calib_cam<N>.json is a timeline: team_timeline)."""
         if "H_near" in d:
             return cls.from_team(d)
         cal = cls.from_team(d["team"], tuple(float(v) for v in d["centre"]))
         return replace(cal, rms_px=float(d["rms_px"]), used=list(d.get("used", [])),
-                       shift=tuple(float(v) for v in d.get("shift_px", (0.0, 0.0))))
+                       shift=tuple(float(v) for v in d.get("shift_px", (0.0, 0.0))), resolved=bool(d.get("resolved", True)))
 
     @classmethod
     def from_team(cls, d: dict, centre: tuple[float, float] = Court().centre) -> "NearFarCalibration":
-        """HOGEUN's calibration of one camera (court_map.load) -> our pitch coordinates (`centre`: Court.centre).
-        rms_px is the 5 clicks against their court points through the near homography: about 1 px for the click-only
-        file, a few px for the refined one (fitted to the white lines with the clicks as soft anchors)."""
+        """HOGEUN's single-frame calibration of one camera (court_map.load_anchor) -> our pitch coordinates (`centre`:
+        Court.centre). rms_px is the clicks against their court points through the near homography: about 1 px for the
+        click-only file, a few px for the refined one (fitted to the white lines with the clicks as soft anchors)."""
+        if "segments" in d:          # court_map.pixel_to_court would need a time for every pixel
+            raise ValueError(f"{file_name(d.get('video', ''))}: 시간별 보정(calib_cam)은 nearfar.team_timeline 으로 읽습니다")
         H = team_to_pitch(centre) @ np.asarray(d["H_near"], float)     # bottom row (0, 0, 1): H[2, 2] stays 1
-        img = np.asarray(d["img_pts"], float)
-        world = np.array([d["world"]["near"][str(i)] for i in range(len(img))], float) + centre
+        near = sorted(d["world"]["near"], key=int)                     # since 11/11 also 2 far corners (world["far"])
+        img = np.array([d["img_pts"][int(i)] for i in near], float)   # his newer tool writes None for skipped clicks
+        world = np.array([d["world"]["near"][i] for i in near], float) + centre
         rms = float(np.sqrt(np.mean(np.sum((image_to_pitch(_inverse(H), world) - img) ** 2, 1))))
         return cls(H=H, rms_px=rms, used=list(d.get("names", [])), team=dict(d), centre=tuple(centre))
 
 
 def team_file(n: int, out_dir: str | os.PathLike = TEAM_OUT) -> str:
-    """The file calibration/court_map.load(n, out_dir) reads: the refined one if it exists (for the record only)."""
+    """The file calibration/court_map.load_anchor(n, out_dir) reads: the refined one if it exists."""
     refined = os.path.join(out_dir, f"H_cam{n}_refined.json")
     return refined if os.path.exists(refined) else os.path.join(out_dir, f"H_cam{n}.json")
 
 
+def tracked_file(n: int, out_dir: str | os.PathLike = TEAM_OUT) -> str:
+    """HOGEUN's whole-match calibration of camera n (calibration/track.py), which court_map.load prefers."""
+    return os.path.join(out_dir, f"calib_cam{n}.json")
+
+
 def load_team(n: int, out_dir: str | os.PathLike = TEAM_OUT, court: Court = Court()) -> NearFarCalibration:
-    """Camera n through calibration/court_map.load. `out_dir` is passed on because court_map.load defaults to "out"
-    relative to the working directory."""
-    return NearFarCalibration.from_team(court_map().load(n, str(out_dir)), court.centre)
+    """Camera n's single-frame calibration through calibration/court_map.load_anchor (its frame: team["t_sec"] on the
+    clock of team["video"]). `out_dir` is passed on because court_map's default is the FUTSAL_MATCH folder."""
+    return NearFarCalibration.from_team(court_map().load_anchor(n, str(out_dir)), court.centre)
+
+
+def _stem(name: str) -> str:
+    """The original's name stem of a video or of its start-aligned copy: 20261103_165422 for 20261103_165422.mp4,
+    20261103_165422_sync.mp4 and HOGEUN's 20261103_165422_sync-001.mp4 alike."""
+    return re.sub(r"_sync.*$", "", os.path.splitext(file_name(name))[0])
+
+
+def find_video(video: str) -> tuple[str, int, float] | None:
+    """(match folder, camera n, clock shift s) of a video of a calibrated match, by file name or else by frame count,
+    from the match's sync.json; None for other videos. The shift takes HOGEUN's clock (the start-aligned copy,
+    court_map.load) to the video's: 0 for the copy, the cut (source_time_of_output_0_s) for the original."""
+    name = file_name(video)
+    entries = []
+    for match in sorted(os.listdir(MATCHES)) if os.path.isdir(MATCHES) else []:
+        path = os.path.join(MATCHES, match, "sync.json")
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            sync = json.load(f)
+        for n, cam_video in sync.get("cameras", {}).items():
+            e = next((v for k, v in sync["videos"].items() if _stem(k) == _stem(cam_video)), None)
+            if e is not None:
+                entries.append((os.path.join(MATCHES, match), int(n), e))
+    for out_dir, n, e in entries:
+        if _stem(name) == _stem(e["source"]):
+            return out_dir, n, (0.0 if "_sync" in name else float(e["source_time_of_output_0_s"]))
+    if entries and os.path.isfile(video):                # a renamed copy
+        cap = cv2.VideoCapture(video)
+        frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        cap.release()
+        for out_dir, n, e in entries:
+            if frames == e.get("source_frames"):
+                return out_dir, n, float(e["source_time_of_output_0_s"])
+            if frames == e.get("video_frames"):
+                return out_dir, n, 0.0
+    return None
+
+
+def team_timeline(n: int, out_dir: str | os.PathLike = TEAM_OUT, shift_s: float = 0.0,
+                  court: Court = Court()) -> CalibrationTimeline:
+    """Camera n's whole-match calibration (court_map.load: calib_cam<n>.json on the clock of the start-aligned copy) as
+    a timeline on a clock `shift_s` later (find_video). Each stretch HOGEUN's track.py found keeps its own homography
+    pair; its slow drift is held at the middle of each gap between drift samples (court_map.homographies_at there).
+    Unresolved stretches, gaps and the times before the first and after the last stretch get resolved=False entries:
+    NaN positions, as court_map.pixel_to_court gives there.
+    shortcut: drift held per 30 s sample gap (at most 0.75 px off on 10/8 and 11/3; court_map interpolates linearly),
+    evaluate court_map.pixel_to_court per box if the samples ever get sparse."""
+    cm = court_map()
+    cal = cm.load(n, str(out_dir))
+    if "segments" not in cal:
+        raise ValueError(f"{tracked_file(n, out_dir)}: 시간별 보정이 아닙니다 (single frame: load_team)")
+    static = {k: v for k, v in cal.items() if k != "segments"}
+    base = NearFarCalibration.from_team(static, court.centre)            # rms_px and the clicks of HOGEUN's frame
+    seen = lambda team: replace(base, H=team_to_pitch(base.centre) @ np.asarray(team["H_near"], float), team=team)
+    entries, last, end = [], static, None
+    for seg in sorted(cal["segments"], key=lambda s: s["t0"]):
+        t0, t1 = float(seg["t0"]), float(seg["t1"])
+        if end is not None and t0 > end:
+            entries.append((end, replace(seen({**last, "source": "gap"}), resolved=False)))
+        if seg["source"] == "unresolved":
+            entries.append((t0, replace(seen({**last, "source": "unresolved"}), resolved=False)))
+        else:
+            cuts = [t0] + sorted(float(t) for t, _, _ in seg.get("drift") or [] if t0 < t < t1) + [t1]
+            for a, b in zip(cuts, cuts[1:]):
+                Hn, Hf = cm.homographies_at(seg, (a + b) / 2)
+                dx, dy = cm.drift_at(seg, (a + b) / 2)[0]
+                last = {**static, "H_near": Hn.tolist(), "H_far": Hf.tolist(), "source": seg["source"],
+                        "segment_s": [t0, t1]}
+                entries.append((a, replace(seen(last), shift=(float(dx), float(dy)))))
+        end = t1 if end is None else max(end, t1)
+    entries.append((end, replace(seen({**last, "source": "after"}), resolved=False)))
+    if entries[0][0] + shift_s > 0:                      # the video starts before HOGEUN's first stretch
+        entries.insert(0, (-shift_s, replace(entries[0][1], team={**entries[0][1].team, "source": "before"}, resolved=False)))
+    return [(t + shift_s, c) for t, c in entries]
 
 
 def knock_timeline(base: Calibration, knocks: list[tuple[float, tuple[float, float]]]) -> CalibrationTimeline:
@@ -255,7 +361,9 @@ def known_knocks(video: str, at_s: float) -> list[tuple[float, tuple[float, floa
     return None if cam is None else knocks_20261008(cam, at_s)
 
 
-KNOCKS_20261008 = {cam: knocks_20261008(cam, 60.0) for cam in POSES_20261008}    # HOGEUN's files: the 60 s frame
+# HOGEUN's single-frame files until 2026-11-11 (camera1.mp4 / camera2.mp4, clicked at 60 s of the originals); his
+# current 10/8 files sit on the start-aligned copies and come with calib_cam<N>.json, which replaces these knocks
+KNOCKS_20261008 = {cam: knocks_20261008(cam, 60.0) for cam in POSES_20261008}
 
 
 def timeline_json(timeline: CalibrationTimeline) -> list[dict]:

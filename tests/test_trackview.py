@@ -86,3 +86,8 @@ def test_find_events_flags_mid_pitch_breaks_only():
     c = np.tile([10.0, 10.0], (n, 1))                              # whole window
     ev = trackview.find_events(TrackSet(40, 20, 10, [PlayerTrack(1, "A", a), PlayerTrack(2, "A", b), PlayerTrack(3, "B", c)]), COURT)
     assert [(e["id"], e["kind"]) for e in ev] == [(1, "lost")]
+    # no calibration for the first 4 s and the last 3 s (nobody has a position): those edges are no ID changes
+    blind = lambda xy: np.where((np.arange(n) >= 40)[:, None] & (np.arange(n) < 70)[:, None], xy, np.nan)
+    ev = trackview.find_events(TrackSet(40, 20, 10, [PlayerTrack(4, "A", blind(c)), PlayerTrack(5, "B", blind(c + 5))]), COURT)
+    assert ev == []
+    assert trackview.find_events(TrackSet(40, 20, 10, []), COURT) == []

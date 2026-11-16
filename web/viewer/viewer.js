@@ -128,6 +128,11 @@
       }
       ctx.globalAlpha = 1;
     }
+    const b = data.ball;                    // optional (pipeline.ball): one position per frame, null when none
+    if (b && b.x[frame] != null) {
+      ctx.fillStyle = "white"; ctx.strokeStyle = "black"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(X(b.x[frame]), Y(b.y[frame]), Math.max(3, scale * 0.22), 0, 7); ctx.fill(); ctx.stroke();
+    }
     $("seek").value = frame;
     $("clock").textContent = `${fmt(frame / data.fps)} / ${fmt(data.n_frames / data.fps)}`;
   }
