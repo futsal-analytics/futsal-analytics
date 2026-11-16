@@ -17,9 +17,14 @@ from .boxes import _pitch
 
 
 def read_track(path: str) -> list[dict]:
-    """track_ball.py rows that have a box (detected or predicted)."""
+    """track_ball.py rows that have a box (detected or predicted). Other CSVs (to_court.py's, the raw detections) are
+    refused, so a wrong file stops the run before the tracking, not after it."""
     with open(path, newline="", encoding="utf-8-sig") as f:
-        return [r for r in csv.DictReader(f) if r.get("status") in ("detected", "predicted")]
+        rows = csv.DictReader(f)
+        if not {"t", "status", "x1", "y1", "x2", "y2"} <= set(rows.fieldnames or ()):
+            raise ValueError(f"{nearfar.file_name(path)}: ball_tracking/track_ball.py 결과가 아닙니다 "
+                             "(t, status, x1, y1, x2, y2 칸이 있어야 합니다)")
+        return [r for r in rows if r.get("status") in ("detected", "predicted")]
 
 
 def clock_shift(ball_video: str, player_video: str) -> float:

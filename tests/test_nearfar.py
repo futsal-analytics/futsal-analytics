@@ -286,6 +286,13 @@ def test_trackview_takes_hogeuns_whole_match_file_for_his_videos(tmp_path, capsy
         capsys.readouterr()
         trackview.load_team_calibration(1, video, out_dir=str(tmp_path))
         assert "주의" in capsys.readouterr().out                  # clicked while the camera was shaking
+    only_anchor = tmp_path / "1103"                 # 11/3 without its whole-match file: his anchor of the same camera
+    only_anchor.mkdir()
+    with open(os.path.join(TEAM_1103, "H_cam1_refined.json"), encoding="utf-8") as f:
+        (only_anchor / "H_cam1_refined.json").write_text(f.read(), encoding="utf-8")
+    capsys.readouterr()
+    trackview.load_team_calibration(1, r"D:\footsal\20261103_165422.mp4", out_dir=str(only_anchor))
+    assert "찍은 것" not in capsys.readouterr().out                # no "re-click on your video" for the same camera
     cal = trackview.load_team_calibration(1, r"D:\x\match2_cam1.mp4")       # no calibrated match: say so
     out = capsys.readouterr().out
     assert isinstance(cal, NearFarCalibration) and "그대로였다고" in out and "20261008_170919_sync.mp4 영상에서 찍은 것" in out
@@ -450,6 +457,16 @@ def test_team_timeline_boxes_get_no_position_where_hogeun_found_no_court():
 
 @pytest.mark.skipif(not os.path.exists(os.path.join(CALIB, "cam1", "calib_timeline.json")),
                     reason="needs the local calib/ taps")
+def test_full_match_record_lists_every_hogeun_segment(monkeypatch):
+    """summary.json's calibration note keeps each of HOGEUN's segments, also two of the same kind in a row: cam2's
+    46:13 knock starts a new tracked segment (2752.656 s of the copy = 2773.704 s of the original)."""
+    monkeypatch.syspath_prepend(os.path.join(ROOT, "experiments"))
+    full_match = importlib.import_module("full_match")
+    rec = full_match.calib_record("cam2", full_match.timeline("cam2"))
+    assert any(s == "tracked" and abs(t - 2773.704) < 0.01 for t, s in rec["stretches"])
+    assert rec["clock_shift_s"] == pytest.approx(CUT_1008[2])
+
+
 def test_full_match_timelines_agree_with_our_calibration(monkeypatch):
     """experiments/full_match.py now runs on HOGEUN's calibration; with its 10/8 knocks it agrees in metres with our
     tapped timeline (calib/<cam>/calib_timeline.json, only read) where both are settled: cam1 after its 2:40 knock,

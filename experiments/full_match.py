@@ -28,7 +28,7 @@ from futsal.homography import timeline_from_json
 from futsal import nearfar
 from futsal.nearfar import NearFarCalibration, knock_timeline, knocks_20261008, load_team, save_timeline, team_file
 from futsal.pipeline.align import corrected_sync
-from futsal.pipeline.ball import ball_track
+from futsal.pipeline.ball import ball_track, clock_shift, read_track
 from futsal.pipeline.boxes import cam_boxes_from_cache
 from futsal.pipeline.detect import Detection
 from futsal.pipeline.run import tracks_to_trackset, track_cams
@@ -51,7 +51,7 @@ def timeline(cam: str, video: str | None = None) -> list:
     # HOGEUN's single-frame calibration with our 10/8 knocks (until 2026-11-13; his t_sec is now on the clock of the
     # start-aligned copy, so add the shift of find_video): uncomment these two, drop the rest.
     # base = load_team(int(cam.removeprefix("cam")))
-    # return knock_timeline(base, knocks_20261008(cam, float(base.team["t_sec"]) + shift))
+    # return knock_timeline(base, knocks_20261008(cam, float(base.team["t_sec"]) + nearfar.find_video(video or nearfar.VIDEOS_20261008[cam][0])[2]))
     found = nearfar.find_video(video or nearfar.VIDEOS_20261008[cam][0])
     if found is None or f"cam{found[1]}" != cam:
         raise ValueError(f"{video}: not {cam} of a match in calibration/out ({found})")
@@ -63,9 +63,10 @@ def calib_record(cam: str, tl: list, video: str | None = None) -> dict:
     """summary.json's note of which calibration a camera used: HOGEUN's file and its stretches, or the knock shifts."""
     if isinstance(tl[0][1], NearFarCalibration) and "source" in tl[0][1].team:
         out_dir, n, shift = nearfar.find_video(video or nearfar.VIDEOS_20261008[cam][0])
+        seg = lambda c: (c.team["source"], c.team.get("segment_s"))       # one of HOGEUN's segments (a knock starts one)
         return {"file": os.path.relpath(nearfar.tracked_file(n, out_dir), ROOT).replace(os.sep, "/"), "clock_shift_s": shift,
                 "stretches": [(round(t, 3), c.team["source"]) for k, (t, c) in enumerate(tl)
-                              if k == 0 or c.team["source"] != tl[k - 1][1].team["source"]]}
+                              if k == 0 or seg(c) != seg(tl[k - 1][1])]}
     if isinstance(tl[0][1], NearFarCalibration):
         return {"file": os.path.relpath(team_file(int(cam.removeprefix("cam"))), ROOT).replace(os.sep, "/"),
                 "knocks": [(t, c.shift) for t, c in tl]}
@@ -86,6 +87,17 @@ if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
     meta = json.load(open(os.path.join(CACHE, "meta.json")))
     court, rate, start = Court(), float(meta["rate"]), float(meta["start"])
+    names = list(meta["videos"])
+    if len(a.ball or []) > len(names) or (a.ball_video and len(a.ball_video) != len(a.ball or [])):
+        ap.error("--ball: at most one CSV per camera; --ball-video: as many as --ball")
+    ball = {c: p for c, p in zip(names, a.ball or []) if p != "-"}
+    ball_videos = {c: v for c, v in zip(names, a.ball_video or []) if v != "-"}
+    for c, p in ball.items():                              # before the ~10 min of tracking, not after
+        try:
+            read_track(p)
+            clock_shift(ball_videos.get(c, meta["videos"][c]), meta["videos"][c])
+        except (OSError, ValueError) as e:
+            ap.error(str(e))
     t0 = time.time()
     cams, cals = {}, {}
     for cam in meta["videos"]:
@@ -111,11 +123,9 @@ if __name__ == "__main__":
     if clock is not None and clock["applied"]:
         offsets[clock["camera"]] = corrected_sync(*offsets[clock["camera"]], clock, start)
     ball_rec = None
-    if a.ball:
-        names = list(meta["videos"])
-        ball = {c: p for c, p in zip(names, a.ball) if p != "-"}
-        ts.ball, ts.ball_cam, ball_rec = ball_track(ball, dict(zip(names, a.ball_video or [])), meta["videos"], cals,
-                                                    offsets, start, rate, n, info["alignment"], court)
+    if ball:
+        ts.ball, ts.ball_cam, ball_rec = ball_track(ball, ball_videos, meta["videos"], cals, offsets, start, rate, n,
+                                                    info["alignment"], court)
         print(f"ball: {ball_rec}", flush=True)
     ts.start = start
     ts.compute_stats()

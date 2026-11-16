@@ -7,7 +7,7 @@ import pytest
 
 from futsal import nearfar
 from futsal.homography import calibration_at
-from futsal.pipeline.ball import ball_track, clock_shift
+from futsal.pipeline.ball import ball_track, clock_shift, read_track
 from futsal.tracks import PlayerTrack, TrackSet
 
 TEAM = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "calibration", "out", "1008")
@@ -53,6 +53,9 @@ def test_ball_lands_on_the_players_grid_and_pitch_frame(tmp_path):
     assert rec["both_detected_median_m"] < 0.05
     with pytest.raises(ValueError):                    # cam2's copy given for cam1: the ball would move by the cut
         clock_shift(copies["cam2"], videos["cam1"])
+    (tmp_path / "ball_cam1.csv").write_text("t,status,track_id,u,v,conf,x_m,y_m\n600.0,detected,1,900,500,0.8,10,5\n")
+    with pytest.raises(ValueError):                    # to_court.py's output instead of track_ball.py's: refused
+        read_track(str(tmp_path / "ball_cam1.csv"))
     ts = TrackSet(40, 20, rate, [PlayerTrack(1, "A", np.zeros((n, 2)))], ball=xy, ball_cam=cam)
     back = TrackSet.from_json(ts.to_json())
     assert np.allclose(back.ball, xy, atol=0.006, equal_nan=True) and (back.ball_cam == cam).all()   # cm in the file

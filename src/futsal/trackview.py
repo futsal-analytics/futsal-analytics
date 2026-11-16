@@ -55,7 +55,7 @@ from .court import Court
 from .homography import Calibration, CalibrationTimeline, calibration_at, timeline_from_json
 from .pipeline import detect, yolo_track
 from .pipeline.align import corrected_sync
-from .pipeline.ball import ball_track, clock_shift
+from .pipeline.ball import ball_track, clock_shift, read_track
 from .pipeline.run import IDS, LINKERS, build_tracks
 from .tracks import TrackSet
 
@@ -112,8 +112,9 @@ def load_team_calibration(n: int, video: str | None = None, auto_moves: bool = F
     cal = nearfar.load_team(n, out_dir)
     at_s = cal.team.get("t_sec")
     made = nearfar.find_video(cal.team["video"]) if cal.team.get("video") else None
-    if at_s is not None and found is not None and made is not None and made[:2] == found[:2]:
-        at_s = float(at_s) - made[2] + found[2]       # clicked on another file of this camera: onto our video's clock
+    same_cam = found is not None and made is not None and made[:2] == found[:2]   # he clicked another file of this camera
+    if at_s is not None and same_cam:
+        at_s = float(at_s) - made[2] + found[2]       # his t_sec onto our video's clock
     cam = nearfar.camera_20261008(video) if video else None
     if cam is not None and cam != f"cam{n}":          # videos given in the wrong order: cam1's calibration on cam2's video
         raise ValueError(f"{nearfar.file_name(video)} 은 10/8 경기 {cam} 영상인데 cam{n} 자리에 들어왔습니다 "
@@ -125,7 +126,7 @@ def load_team_calibration(n: int, video: str | None = None, auto_moves: bool = F
             print(f"  {nearfar.file_name(video)}: 기록된 카메라 움직임이 없어 촬영 내내 카메라가 그대로였다고 보고 계산합니다"
                   " (움직였으면 --auto-moves)")
             made_on = nearfar.file_name(cal.team.get("video", ""))
-            if cam is None and made_on and made_on != nearfar.file_name(video):
+            if cam is None and made_on and made_on != nearfar.file_name(video) and not same_cam:
                 print(f"  주의: 이 보정은 HOGEUN이 {made_on} 영상에서 찍은 것입니다. 다른 경기이거나 카메라 자리가 바뀌었으면"
                       " calibration/ 에서 그 영상으로 다시 찍어야 합니다")
         return cal
@@ -530,6 +531,7 @@ def main(argv=None):
         if not os.path.isfile(p):
             ap.error(f"공 결과 파일이 없습니다: {p}")
         try:
+            read_track(p)
             clock_shift(ball_videos.get(n, videos[n]), videos[n])
         except ValueError as e:
             ap.error(str(e))
