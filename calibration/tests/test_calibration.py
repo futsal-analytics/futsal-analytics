@@ -79,7 +79,9 @@ def test_spec_scales_court_lines_and_landmarks():
 
 def test_default_court_is_unchanged():
     lms = click_landmarks()
-    assert [lm["xy"] for lm in lms] == [(0.0, 10.0), (0.0, -3.0), (0.0, -10.0), (-14.0, -10.0), (-10.0, 0.0), (20.0, 10.0), (20.0, -10.0)]
+    assert [lm["xy"] for lm in lms[:7]] == [(0.0, 10.0), (0.0, -3.0), (0.0, -10.0), (-14.0, -10.0), (-10.0, 0.0), (20.0, 10.0), (20.0, -10.0)]
+    assert not any(lm.get("optional") for lm in lms[:7])  # 기존 7클릭 파일과 순서가 같다
+    assert [lm["xy"] for lm in lms[7:]] == [(-14.0, 0.0), (-18.0, -10.0)] and all(lm["optional"] for lm in lms[7:])
 
 
 def test_solve_half_recovers_synthetic_homography():
@@ -137,10 +139,10 @@ def test_to_sync_time_shifts_and_clips_segments():
 
 def test_load_uses_sync_time_when_sync_file_exists(tmp_path):
     cal = {**v2(True), "t_sec": 25.0, "video": "/videos/camera1.mp4"}
-    (tmp_path / "calib_cam1.json").write_text(json.dumps(cal))
+    (tmp_path / "calib_cam1.json").write_text(json.dumps(cal), encoding="utf-8")
     assert load(1, tmp_path)["segments"][2]["t0"] == 20.0  # sync.json이 없으면 원본 시각
     sync = {"cameras": {"1": "a_sync.mp4"}, "videos": {"a_sync.mp4": {"source_time_of_output_0_s": 8.0, "duration_s": 15.0}}}
-    (tmp_path / "sync.json").write_text(json.dumps(sync))
+    (tmp_path / "sync.json").write_text(json.dumps(sync), encoding="utf-8")
     out = load(1, tmp_path)
     assert [s["t0"] for s in out["segments"]] == [0.0, 2.0, 12.0]
     assert out["video"] == "/videos/a_sync.mp4"
@@ -594,9 +596,9 @@ def test_score_excludes_fit_corners_from_existing_labels():
 
 def test_load_does_not_shift_results_tracked_on_the_synced_video(tmp_path):
     cal = {**v2(True), "t_sec": 25.0, "video": "/videos/a_sync.mp4"}
-    (tmp_path / "calib_cam1.json").write_text(json.dumps(cal))
+    (tmp_path / "calib_cam1.json").write_text(json.dumps(cal), encoding="utf-8")
     sync = {"cameras": {"1": "a_sync.mp4"}, "videos": {"a_sync.mp4": {"source_time_of_output_0_s": 8.0, "duration_s": 15.0}}}
-    (tmp_path / "sync.json").write_text(json.dumps(sync))
+    (tmp_path / "sync.json").write_text(json.dumps(sync), encoding="utf-8")
     assert [s["t0"] for s in load(1, tmp_path)["segments"]] == [0.0, 10.0, 20.0]
 
 
@@ -762,7 +764,7 @@ def test_load_reads_the_selected_match(tmp_path, monkeypatch):
     import calib_core
     for match, video in (("1008", "a.mp4"), ("1103", "b.mp4")):
         os.makedirs(tmp_path / "out" / match)
-        with open(tmp_path / "out" / match / "H_cam1.json", "w") as f:
+        with open(tmp_path / "out" / match / "H_cam1.json", "w", encoding="utf-8") as f:
             json.dump({"half": "east", "video": video}, f)
     monkeypatch.setattr(calib_core, "ROOT", str(tmp_path))
     monkeypatch.delenv("FUTSAL_MATCH", raising=False)
@@ -850,3 +852,202 @@ def test_walk_keeps_feature_confirmed_position_when_lines_fade(monkeypatch):
     assert all(x.ok and x.by == "features" and abs(x.dx) < 0.5 and abs(x.dy) < 0.5 for x in s)
     no_feat = tr.walk(Faded(), [5.0], G, pts, (0.0, 0.0), TrackConfig(use_features=False), 0.4, lambda *_: None, start_frame=_scene(sky=200))
     assert not no_feat[0].ok or abs(no_feat[0].dx) + abs(no_feat[0].dy) > 10  # 흰 선만으로는 엉뚱한 곳에 맞추거나 놓친다
+
+
+def test_mirrored_match_labels_become_the_1008_layout():
+    """1103(좌우 반전 배치)의 라벨은 화면과 함께 뒤집으면 1008 배치 카메라의 라벨과 같아야 한다 (모델은 한 배치만 배운다)."""
+    import make_dataset as md
+
+    F = np.array([[-1.0, 0, 1919], [0, 1, 0], [0, 0, 1]])
+    mirrored = seg_of(np.diag([1.0, -1.0, 1.0]) @ H_NEAR @ F)
+    plain = md.project_keypoints(seg_of(H_NEAR), "east", 1)
+    frame = np.zeros((1080, 1920, 3), np.uint8)
+    frame[:, :10] = 255
+    flipped, kp = md.canonical(frame, md.project_keypoints(mirrored, "east", 1))
+    assert np.allclose(kp[:, 2], plain[:, 2]) and np.allclose(kp[plain[:, 2] > 0], plain[plain[:, 2] > 0], atol=1e-6)
+    assert flipped[0, -1, 0] == 255 and flipped[0, 0, 0] == 0
+
+
+# ---- 평가 하네스 (eval/harness.py)
+
+
+def test_harness_zones_follow_camera_direction():
+    import harness as hz
+
+    assert [hz.zone_of((x, 0), "east") for x in (-10, -2, 2, 10, 18)] == ["near", "center", "center", "far_mid", "goal"]
+    assert [hz.zone_of((x, 0), "west") for x in (10, -10, -18)] == ["near", "far_mid", "goal"]
+
+
+def test_harness_scores_points_by_zone_with_components_and_ci():
+    import harness as hz
+
+    cal = {"half": "east", "H_near": H_NEAR.tolist(), "H_far": H_NEAR.tolist()}
+    world = np.array([[-10.0, 0.0], [10.0, 0.0], [18.0, 5.0]])
+    px = project(G, world)[0]
+    px[1, 0] += 3  # 먼 쪽 점 하나만 3 px 어긋나게 찍음
+    label = {"cam": 1, "t": 0.0, "half": "east", "source": "tape",
+             "points": [{"id": f"p{i}", "kind": "point", "px": px[i].tolist(), "world": world[i].tolist()} for i in range(3)]}
+    rows = hz.score_rows([label], lambda n: cal)
+    by = {r["id"]: r for r in rows}
+    assert by["p0"]["zone"] == "near" and by["p0"]["error"] < 1e-3
+    assert by["p1"]["zone"] == "far_mid" and by["p1"]["error"] > 0.02 and by["p1"]["ex"] is not None
+    assert by["p2"]["zone"] == "goal" and hz.gate_g1(rows)
+    s = hz.summarize(rows)
+    assert all(x["reference_only"] for x in s)  # n < 5
+    assert not hz.gate_g1([{**r, "source": "video_click"} for r in rows])
+
+
+def test_harness_median_ci_and_split_guard(tmp_path):
+    import harness as hz
+
+    lo, hi = hz.median_ci([1.0, 2.0, 3.0, 4.0, 5.0])
+    assert lo <= 3.0 <= hi and hz.median_ci([1.0]) != hz.median_ci([1.0])  # nan
+    splits = {"train": ["1103"], "tune": [], "val": ["1008"], "blind": ["1201"]}
+    assert hz.check_purpose("1103", "train", splits) == "train"
+    assert hz.check_purpose("1008", "val", splits) == "val"
+    for m, p in (("1008", "tune"), ("1201", "train"), ("1008", "train")):
+        with pytest.raises(ValueError):
+            hz.check_purpose(m, p, splits)
+    log = tmp_path / "log.jsonl"
+    rec = hz.log_usage("1008", "val", [str(log)], {"labels_n": 3}, path=str(log))
+    assert json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["purpose"] == "val" and rec["labels_n"] == 3
+
+
+def _true_clicks(G_cam, lms):
+    world = np.array([lm["xy"] for lm in lms], float)
+    world[3, 0], world[8, 0] = -13.0, -18.0  # 선 클릭은 선 위 아무 곳
+    return project(G_cam, world)[0]
+
+
+def test_check_clicks_reveal_a_misclicked_10m_spot():
+    """10 m 지점은 7클릭만으로는 틀려도 잔차가 0이다. 확인 클릭 2개를 더하면 5 px 오클릭이 드러난다."""
+    from calib_core import MISCLICK_PX, click_residuals_px, manual_result
+
+    lms = click_landmarks()
+    clicks = _true_clicks(G, lms)
+    clean = manual_result(clicks.tolist(), lms, "east")
+    assert max(click_residuals_px(clean, clicks.tolist(), lms).values()) < 0.1
+    bad = clicks.copy()
+    bad[4] += (0, 5)  # 10 m 지점을 5 px 아래에
+    seven = manual_result(bad[:7].tolist(), lms, "east")
+    assert max(click_residuals_px(seven, bad[:7].tolist(), lms).values()) < 0.1  # 7클릭: 드러나지 않음
+    nine = manual_result(bad.tolist(), lms, "east")
+    assert max(click_residuals_px(nine, bad.tolist(), lms).values()) > MISCLICK_PX
+
+
+def test_calibrator_skips_optional_checks_and_flags_misclicks():
+    from calibrate import Calibrator
+
+    cal = Calibrator(render(G), "east")
+    clicks = _true_clicks(G, cal.lms)
+    for x, y in clicks[:7]:
+        cal.click(x, y)
+    assert cal.ready and cal.result is not None and not cal.done and not cal.suspicious
+    cal.skip()
+    cal.skip()
+    assert cal.done and cal.clicks[7:] == [None, None]
+    d = cal.to_json("v.mp4")
+    assert d["img_pts"][7] is None and "7" not in d["world"]["near"]
+    cal.undo(); cal.undo()
+    cal.clicks[4] = (clicks[4][0], clicks[4][1] + 6)
+    cal.click(*clicks[7]); cal.click(*clicks[8])
+    assert cal.suspicious  # 10 m 지점 오클릭이 확인 클릭으로 드러남
+    cal.render()
+    for _ in range(9):
+        cal.undo()
+    cal.click(*clicks[0])
+    cal.skip()  # 필수 클릭은 건너뛸 수 없다
+    assert len(cal.clicks) == 1
+
+
+def test_resolve_video_finds_moved_file(tmp_path, monkeypatch):
+    """JSON에 다른 PC(WSL) 경로가 적혀 있어도 FUTSAL_VIDEOS 아래에서 같은 파일 이름을 찾는다."""
+    import calib_core
+
+    (tmp_path / "1103").mkdir()
+    moved = tmp_path / "1103" / "20261103_165422_sync-001.mp4"
+    moved.write_bytes(b"")
+    monkeypatch.setenv("FUTSAL_VIDEOS", str(tmp_path))
+    calib_core._video_index.clear()
+    stale = "/mnt/d/02_Projects/캡스톤/1103/20261103_165422_sync-001.mp4"
+    assert calib_core.resolve_video(stale) == str(moved)
+    assert calib_core.resolve_video("C:\\old\\20261103_165422_sync-001.mp4") == str(moved)
+    assert calib_core.resolve_video(str(moved)) == str(moved)  # 있는 경로는 그대로
+    assert calib_core.resolve_video("/nowhere/unknown.mp4") == "/nowhere/unknown.mp4"  # 못 찾으면 원래 경로
+    assert calib_core.resolve_video(None) is None
+
+
+def _render_bent(G_near, G_far, spec=CourtSpec(), seed=0):
+    """가까운 하프(x <= 0)는 G_near, 먼 하프는 G_far로 그린 프레임: 하프라인에서 바닥이 꺾인 코트."""
+    rng = np.random.default_rng(seed)
+    frame = np.zeros((1080, 1920, 3), np.uint8)
+    frame[:] = (60, 130, 50)
+    frame = np.clip(frame.astype(np.int16) + rng.integers(-12, 12, frame.shape), 0, 255).astype(np.uint8)
+    for line in court_lines(spec):
+        dense = np.concatenate([np.linspace(a, b, 60, endpoint=False) for a, b in zip(line[:-1], line[1:])])
+        px_n, d_n = project(G_near, dense)
+        px_f, d_f = project(G_far, dense)
+        far = dense[:, 0] > 0
+        px, depth = np.where(far[:, None], px_f, px_n), np.where(far, d_f, d_n)
+        keep = (depth > 0) & (np.abs(px) < 1e4).all(1)
+        for run in np.split(np.arange(len(dense)), np.where(~keep)[0]):
+            run = run[keep[run]]
+            if len(run) > 1:
+                cv2.polylines(frame, [np.rint(px[run] * 16).astype(np.int32)], False, (235, 235, 235), 5, cv2.LINE_AA, shift=4)
+    return frame
+
+
+def test_free_far_model_fits_a_bend_the_shared_model_cannot():
+    """먼 하프가 H_near o K 꼴이 아닌 경우(하프라인 방향 원근이 다름): "free"가 "shared"보다 먼 쪽을 잘 맞추고
+    하프라인에서는 H_near와 거의 이어진다. 기본값 "shared"는 그대로다."""
+    from refine import FAR_MARGIN, align_far, halfway_gap_m, ridge_map, sample_model
+
+    G_far_true = G @ np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.003, 1.0]])  # 3자유도 K로는 표현할 수 없는 꺾임
+    frame = _render_bent(G, G_far_true)
+    ridge = cv2.GaussianBlur(ridge_map(frame), (0, 0), 1)
+    model = sample_model()
+    pts = model[model[:, 0] > -FAR_MARGIN]
+    corners = CLICK_WORLD[5:]
+    corner_px = project(G_far_true, corners)[0]
+    xs, ys = np.meshgrid(np.linspace(3, 19, 9), np.linspace(-9, 9, 7))
+    grid = np.c_[xs.ravel(), ys.ravel()]
+    grid_px = project(G_far_true, grid)[0]
+
+    def far_error(H):
+        return np.median(np.linalg.norm(cv2.perspectiveTransform(grid_px.reshape(-1, 1, 2), H)[:, 0] - grid, axis=1))
+
+    H_shared, _ = align_far(ridge, H_NEAR, pts, "shared", anchor_world=corners, anchor_img=corner_px, half="east")
+    H_free, _ = align_far(ridge, H_NEAR, pts, "free", anchor_world=corners, anchor_img=corner_px, half="east")
+    # 측정 (HALFWAY_LAM 3): shared 0.21 m, free 0.12 m, free 하프라인 차이 0.23 m (참값의 꺾임은 하프라인 끝에서 0.29 m)
+    assert far_error(H_free) < 0.7 * far_error(H_shared)
+    assert far_error(H_free) < 0.15
+    assert halfway_gap_m(H_NEAR, H_shared) < 1e-6  # shared는 하프라인을 정확히 공유
+    assert halfway_gap_m(H_NEAR, H_free) < 0.35
+    with pytest.raises(ValueError):
+        align_far(ridge, H_NEAR, pts, "bogus")
+
+
+def test_free_far_model_blends_across_halfway_and_shared_is_unchanged():
+    """far_model "free": 하프라인에서는 H_near, FAR_BLEND_M 너머는 H_far, 그 사이는 연속. "shared"는 섞지 않는다."""
+    from court_map import FAR_BLEND_M
+
+    H_far = np.linalg.inv(translation(0, -6) @ G)  # 먼 쪽만 6 px 어긋난 H_far: 하프라인에서 H_near와 다르다
+    shared = {"half": "east", "H_near": H_NEAR.tolist(), "H_far": H_far.tolist()}
+    free = {**shared, "far_model": "free"}
+    ys = np.linspace(-8, 8, 5)
+
+    def px_at(x):
+        return project(G, np.c_[np.full(len(ys), x), ys])[0]
+
+    for x in (0.01, 0.5 * FAR_BLEND_M, FAR_BLEND_M + 2.0):
+        near = cv2.perspectiveTransform(px_at(x).reshape(-1, 1, 2), H_NEAR)[:, 0]
+        far = cv2.perspectiveTransform(px_at(x).reshape(-1, 1, 2), H_far)[:, 0]
+        got = pixel_to_court(free, px_at(x))
+        w = min(x / FAR_BLEND_M, 1.0)
+        assert np.allclose(got, (1 - w) * near + w * far, atol=1e-6)
+        assert np.allclose(pixel_to_court(shared, px_at(x)), far, atol=1e-9)  # shared: 하프라인 너머는 H_far 그대로
+    # 하프라인을 넘을 때 free는 튀지 않는다 (shared에 같은 H_far를 넣으면 튄다)
+    step_free = np.linalg.norm(pixel_to_court(free, px_at(0.01)) - pixel_to_court(free, px_at(-0.01)), axis=1).max()
+    step_shared = np.linalg.norm(pixel_to_court(shared, px_at(0.01)) - pixel_to_court(shared, px_at(-0.01)), axis=1).max()
+    assert step_free < 0.05 < step_shared
+    assert np.allclose(pixel_to_court({**shared, "far_blend_m": 9.0}, px_at(3.0)), pixel_to_court(shared, px_at(3.0)))
