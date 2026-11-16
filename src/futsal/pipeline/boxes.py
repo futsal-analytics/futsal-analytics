@@ -42,7 +42,8 @@ class CamBoxes:
     name: str
     fid: np.ndarray               # (n,) int   source frame index (as stored by the detector)
     t: np.ndarray                 # (n,) camera clock, s
-    k: np.ndarray                 # (n,) int   grid frame on the reference clock (-1: surplus source frame, off the grid)
+    k: np.ndarray                 # (n,) int   grid frame on the reference clock (-1: off the grid: a surplus source
+                                  #            frame, or a box without a pitch position where the calibration has none)
     xyxy: np.ndarray              # (n, 4) pixels (calibrated resolution)
     conf: np.ndarray              # (n,)
     reid: np.ndarray | None       # (n, d) float32, L2-normalised (to the float16 precision it is stored with)
@@ -141,6 +142,7 @@ def _cam_boxes(name: str, fid, t, xyxy, conf, reid, color, cal, offset_s: float,
         foot = np.stack([(xyxy[:, 0] + xyxy[:, 2]) / 2, xyxy[:, 3]], 1)
     xy, sigma = _pitch(cal, t, foot)
     k = grid_frames(fid, t, offset_s, drift, start_s, rate, legacy_grid)
+    k[~np.isfinite(xy).all(1)] = -1     # no position (HOGEUN found no court then): as if the box were not there
     return CamBoxes(name=name, fid=fid, t=t, k=k, xyxy=xyxy, conf=conf, reid=reid, color=color, foot=foot,
                     h=xyxy[:, 3] - xyxy[:, 1], w=xyxy[:, 2] - xyxy[:, 0], xy=xy, xy_raw=xy.copy(), sigma=sigma,
                     in_court=court.contains(xy, COURT_MARGIN_M) if len(xy) else np.zeros(0, bool),

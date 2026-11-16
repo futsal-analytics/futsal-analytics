@@ -44,7 +44,7 @@ def meta() -> dict:
 
 
 def calib_cam1(out_dir: str):
-    """cam1's calibration timeline exactly as full_match.py builds and reads it back (HOGEUN + 10/8 knocks)."""
+    """cam1's calibration timeline exactly as full_match.py builds and reads it back (HOGEUN's whole-match file)."""
     from full_match import timeline
     path = os.path.join(out_dir, f"calib_timeline_{CAM}.json")
     save_timeline(timeline(CAM), path)

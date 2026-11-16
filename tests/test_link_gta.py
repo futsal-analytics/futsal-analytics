@@ -377,7 +377,7 @@ def test_build_tracks_v2gta_end_to_end():
 
 def test_trackview_accepts_v2gta(tmp_path, monkeypatch):
     """--ids v2gta parses, asks for the ReID embedder like v2 and reaches trackview.run with ids='v2gta'. The pipeline's
-    calibration is HOGEUN's (calibration/out, only read) and its detector whatever detection/detect_person.py says."""
+    calibration is HOGEUN's (calibration/out/<match>, only read) and its detector whatever detection/detect_person.py says."""
     from futsal import trackview
     from futsal.pipeline import reid, yolo_track
     seen = {}
@@ -389,7 +389,7 @@ def test_trackview_accepts_v2gta(tmp_path, monkeypatch):
     assert seen["det_tag"] == yolo_track.tag(yolo_track.read_settings())
     assert seen["det_tag"].startswith("detection/detect_person.py:")
     cal = seen["summary"]["calibration"]["cam1"]
-    assert cal["file"] == "calibration/out/H_cam1_refined.json" and cal["t_sec"] == 60.0
+    assert cal["file"] == "calibration/out/1008/H_cam1_refined.json" and cal["t_sec"] == 60.0      # unknown video: 10/8
     assert cal["timeline"] == [{"from_s": 0.0, "shift_px": [0.0, 0.0]}]        # a.mp4 is no 10/8 video: no knocks
     with pytest.raises(SystemExit):                                           # calibration/ is 40x20 only
         trackview.main(["--video", "a.mp4", "--start", "0", "--court", "38x18", "--out", str(tmp_path)])

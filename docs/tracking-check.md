@@ -51,9 +51,9 @@ python -m futsal.trackview --video C:\Users\user\dev\futsal-videos\20261008_1709
 |---|---|
 | `--offset 0 124.27` | 카메라별 시간 차 (cam1 = 0, cam2 = `futsal.sync` 결과) |
 | `--start 600 --duration 180` | cam1 영상 10:00부터 3분 |
-| `--auto-moves` | 카메라가 움직인 순간을 자동으로 찾아 보정 (영상 전체를 훑어서 몇 분 더 걸림). 10/8 영상(파일 이름이나 프레임 수로 알아봄)은 기록된 움직임(cam1 2:40, cam2 46:13)을 HOGEUN 보정 프레임(`t_sec`) 기준으로 자동으로 쓰므로 필요 없습니다. 10/8 영상에서는 이 자동 감지가 틀린 움직임을 찾습니다. 다른 영상에서 이 옵션을 안 쓰면 카메라가 안 움직였다고 보고 계산합니다 (화면에 알려 줌) |
+| `--auto-moves` | 카메라가 움직인 순간을 자동으로 찾아 보정 (영상 전체를 훑어서 몇 분 더 걸림). HOGEUN이 보정한 경기(10/8, 11/3) 영상은 그가 카메라를 따라가며 만든 경기 전체 보정을 쓰므로 이 옵션을 쓰지 않습니다. 다른 영상에서 이 옵션을 안 쓰면 카메라가 안 움직였다고 보고 계산합니다 (화면에 알려 줌) |
 | `--rate 10` | 추적에 쓰는 초당 프레임 수. 검출(ByteTrack)은 모든 프레임에 돕니다 |
-| `--team-calib calibration\out` | HOGEUN 좌표 변환 결과 폴더 (기본값). 카메라 N은 `H_camN_refined.json`, 없으면 `H_camN.json` |
+| `--team-calib calibration\out\1103` | HOGEUN 좌표 변환 결과 폴더. 기본값은 영상 이름(원본이나 시작을 맞춘 `…_sync.mp4`)이나 프레임 수로 `calibration\out\<회차>\sync.json`에서 찾은 그 경기 폴더이고, 모르는 영상이면 `calibration\out\1008`입니다. 그 경기 영상이면 경기 전체 보정 `calib_camN.json`(시간 구간별, 코트를 못 찾은 구간은 좌표 없음), 아니면 한 장면 보정 `H_camN_refined.json`, 없으면 `H_camN.json` |
 | `--no-video` | 확인 영상을 만들지 않음 (`tracks.json`, `summary.json`만) |
 | `--ids v2` | 추적 방식. 기본 `v2`: 카메라별 조각 → 두 카메라 짝짓기 → 팀당 5+1 자리 배정. `v2gta`: 정원 없이 연결 (짧은 구간에서 ID가 덜 바뀌지만 경기 전체에서는 잘게 나뉨). `appearance`는 예전 방식. 비교는 [추적 v2](tracking-v2.md) |
 | `--no-reid` | 사람 재식별(ReID) 계산을 건너뛰고 예전 방식으로 추적. ReID가 설치되지 않았으면 자동으로 이렇게 됩니다 |
