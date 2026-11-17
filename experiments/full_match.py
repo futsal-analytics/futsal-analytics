@@ -9,8 +9,8 @@ Coordinates: HOGEUN's whole-match calibration (calibration/out/<match>/calib_cam
 calibration/court_map.py, futsal.nearfar.team_timeline): he followed each camera (cam1 knocked at 2:40, cam2 at 46:13),
 so its stretches replace our measured 10/8 knocks; the match and the clock shift come from the video names
 (nearfar.find_video). Boxes where he found no court get no position.
-Detections: the cache's own boxes (experiments/build_cache.py: our YOLO26x predict, conf 0.1, 10 Hz, OSNet ReID), not
-detection/; python -m futsal.trackview runs detection/ on the videos. Nothing is written into calib/ or calibration/.
+Detections: the cache's own boxes (experiments/build_cache.py: our YOLO26x predict, conf 0.1, 10 Hz, OSNet ReID), the
+same detector settings python -m futsal.trackview runs on the videos. Nothing is written into calib/ or calibration/.
 """
 import argparse
 import csv

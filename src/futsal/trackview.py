@@ -1,10 +1,11 @@
-"""두 영상 → 선수 추적 한 번에: 검출(detection/) → ReID → 좌표 변환(calibration/) → 시간 맞추기 → 추적 v2 → 결과
+"""두 영상 → 선수 추적 한 번에: 검출 → ReID → 좌표 변환(calibration/) → 시간 맞추기 → 추적 v2 → 결과
 
   python -m futsal.trackview --video cam1.mp4 cam2.mp4 --offset 0 124.27 --start 600 --duration 180 --out trackview
 
 단계와 코드:
-  검출       detection/detect_person.py (차재혁) 의 모델·설정 (YOLO26x, conf 0.3, ByteTrack) 을 그대로 읽어서 모든
-             프레임에 돌림 (pipeline/yolo_track.py). 추적에는 초당 --rate 장만 씀
+  검출       우리 검출기 (pipeline/detect.py): YOLO26x COCO 사전학습, conf 0.1 (--ids v2 / v2gta), 초당 --rate 장.
+             detection/detect_person.py (차재혁, 같은 YOLO26x + conf 0.3 + 모든 프레임 ByteTrack) 는 정답 클립에서
+             찾는 선수가 같고 GPU는 6배라 main() 과 run() 에 주석으로 남김 (pipeline/yolo_track.py)
   ReID       pipeline/reid.py (OSNet), 추적에 쓰는 프레임의 박스마다
   좌표 변환  calibration/ (HOGEUN) 의 court_map 을 그대로 부르고 우리 좌표(0~40, 0~20 m)로 옮김 (futsal/nearfar.py).
              영상이 속한 경기(calibration/out/<경기>/sync.json)의 경기 전체 시간별 보정 calib_cam<N>.json 을 영상
@@ -23,8 +24,8 @@
   det_cam1.json  검출 결과 캐시 (같은 설정으로 다시 돌리면 검출을 건너뜀; ReID 특징은 det_cam1.json.reid.npy)
 
 --start 는 cam1 영상 기준 초, --offset 은 cam1 시각 = 그 카메라 시각 + offset (python -m futsal.sync 결과).
-검출에는 Ultralytics 가 필요합니다: pip install -e ".[vision]". 모든 프레임을 검출하므로 GPU가 없으면 매우 느립니다.
-예전 방식(우리 검출기 pipeline/detect.py, 우리 탭 보정 calib/<cam>/calib.json)은 main() 과 run() 에 주석으로 남겨 두었습니다.
+검출에는 Ultralytics 가 필요합니다: pip install -e ".[vision]". GPU가 없으면 느립니다.
+다른 방식(차재혁 detection/ 검출, 우리 탭 보정 calib/<cam>/calib.json)은 main() 과 run() 에 주석으로 남겨 두었습니다.
 
 추적 방식 (--ids):
   v2          (기본) 상자 단위 추적: 카메라별 조각 → 두 카메라 짝짓기 → 팀당 5+1 자리에 배정. 경기 전체에서
@@ -359,9 +360,9 @@ def run(videos: dict[str, str], cals: dict, offsets: dict[str, tuple[float, floa
         det_tag: str = "", embedder=None, ids: str = "v2", video: bool = True, summary: dict | None = None,
         ball: dict[str, str] | None = None, ball_videos: dict[str, str] | None = None) -> dict:
     """Detect (cached per camera), track with build_tracks(ids=...), write tracks.json / events.csv / summary.json and,
-    with `video`, trackview.mp4. `detector_factory(cam)` gives the camera's detector, which sees every frame of the
-    window in order (pipeline.yolo_track.detection_tracker: detection/'s YOLO + ByteTrack; a plain detect.Detector
-    works too); its boxes are kept at `rate_hz` (yolo_track.track_video). `embedder` (pipeline.reid.reid_embedder)
+    with `video`, trackview.mp4. `detector_factory(cam)` gives the camera's detector (detect.yolo_detector), run on the
+    frames at `rate_hz` (detect.detect_video; with the commented yolo_track lines instead, detection/'s YOLO +
+    ByteTrack sees every frame and its boxes are kept at `rate_hz`). `embedder` (pipeline.reid.reid_embedder)
     adds a ReID embedding to every kept box, which ids="v2" / "v2gta" need; without it they fall back to
     "appearance". The detection cache key is `det_tag` plus whether ReID was computed. `summary` (optional) goes into
     summary.json next to the run's own numbers (per-player distance, speed, time seen). `ball` {camera: track_ball.py
@@ -384,11 +385,12 @@ def run(videos: dict[str, str], cals: dict, offsets: dict[str, tuple[float, floa
                 print(f"  {cam}: 저장된 검출 결과 사용 ({len(d)}개)")
                 continue
         print(f"  {cam}: 선수 검출 중 ({_fmt(s_cam)}부터 {duration:.0f}초)...")
-        # To switch back to our detector on the 10 Hz frames (pipeline/detect.py): uncomment these, drop track_video.
-        # d, fps, _ = detect.detect_video(path, detector_factory(cam), rate_hz=rate_hz, start_s=max(s_cam, 0.0),
-        #                                 end_s=s_cam + duration, progress=True, embedder=embedder)
-        d, fps, _ = yolo_track.track_video(path, detector_factory(cam), rate_hz=rate_hz, start_s=max(s_cam, 0.0),
-                                           end_s=s_cam + duration, progress=True, embedder=embedder)
+        d, fps, _ = detect.detect_video(path, detector_factory(cam), rate_hz=rate_hz, start_s=max(s_cam, 0.0),
+                                        end_s=s_cam + duration, progress=True, embedder=embedder)
+        # To use 차재혁's detection/ (YOLO + ByteTrack on every frame, pipeline/yolo_track.py) instead: uncomment
+        # these with the detection/ lines in main(), drop detect_video above.
+        # d, fps, _ = yolo_track.track_video(path, detector_factory(cam), rate_hz=rate_hz, start_s=max(s_cam, 0.0),
+        #                                    end_s=s_cam + duration, progress=True, embedder=embedder)
         detect.save(d, cache, **want, video_bytes=size)
         dets[cam] = detect.load(cache)[0]       # what a rerun reads (float16 ReID), so both give the same tracks
     # reference clock for tracking: 0 = window start on cam1's clock
@@ -483,10 +485,10 @@ def main(argv=None):
     ap.add_argument("--start", type=float, required=True, help="cam1 영상 기준 시작 초")
     ap.add_argument("--duration", type=float, default=180.0)
     ap.add_argument("--court", default="40x20")
-    # To switch back to our detector: uncomment these with the detect.yolo_detector run(...) call below.
-    # ap.add_argument("--model", default="yolo26s.pt"); ap.add_argument("--imgsz", type=int, default=1280)
-    # ap.add_argument("--conf", type=float, default=None, help="검출 신뢰도 하한 (기본: --ids v2 / v2gta 는 0.1, 그 외 0.3)")
-    ap.add_argument("--rate", type=float, default=10.0, help="추적에 쓰는 초당 프레임 수 (검출·ByteTrack은 모든 프레임)")
+    ap.add_argument("--model", default="yolo26x.pt", help="사람 검출 모델 (COCO 사전학습, 저장소 맨 위 폴더에서 찾음)")
+    ap.add_argument("--imgsz", type=int, default=1280)
+    ap.add_argument("--conf", type=float, default=None, help="검출 신뢰도 하한 (기본: --ids v2 / v2gta 는 0.1, 그 외 0.3)")
+    ap.add_argument("--rate", type=float, default=10.0, help="검출·추적에 쓰는 초당 프레임 수")
     ap.add_argument("--ids", choices=IDS, default="v2", help="추적 방식: v2 (기본, 팀당 5+1 자리 배정, ReID 필요) / v2gta (정원 없는 연결, ReID 필요) / appearance (예전 방식) / motion")
     ap.add_argument("--no-reid", action="store_true", help="ReID 계산을 건너뛰고 예전 방식(appearance)으로 추적")
     ap.add_argument("--auto-moves", action="store_true", help="카메라가 움직인 순간을 자동으로 찾아 보정 (futsal.camshift)")
@@ -546,18 +548,23 @@ def main(argv=None):
             ids = "appearance"
     tapped = getattr(a, "calib", None) or [None] * len(names)      # a.calib exists only with --calib uncommented
     summary = {"calibration": {n: calibration_record(i + 1, cals[n], calib_dirs[i], tapped[i]) for i, n in enumerate(videos)}}
-    # To switch back to our detector (pipeline/detect.py): uncomment these, --model/--conf above, detect_video in run(),
-    # and drop the settings / print / summary["detection"] / run(...) lines below them (one run() call only).
-    # conf = a.conf if a.conf is not None else (0.1 if ids in LINKERS else 0.3)
-    # res = run(videos, cals, offsets, a.start, a.duration, a.out,
-    #           lambda cam: detect.yolo_detector(a.model, conf=conf, imgsz=a.imgsz), court, a.rate,
-    #           det_tag=f"{a.model}@{a.imgsz}/{conf}", embedder=embedder, ids=ids, video=not a.no_video, summary=summary)
-    settings = yolo_track.read_settings()                  # detection/detect_person.py (차재혁): model and track() settings
-    print(f"검출: {_rel(settings['file'])} → {settings['model']} {yolo_track.track_kwargs(settings)}")
-    summary["detection"] = {"file": _rel(settings["file"]), "model": settings["model"], "track": yolo_track.track_kwargs(settings)}
-    res = run(videos, cals, offsets, a.start, a.duration, a.out, lambda cam: yolo_track.detection_tracker(settings),
-              court, a.rate, det_tag=yolo_track.tag(settings), embedder=embedder, ids=ids, video=not a.no_video,
-              summary=summary, ball=ball or None, ball_videos=ball_videos)
+    # Our detector (pipeline/detect.py: YOLO26x COCO predict at --rate, conf 0.1 for v2): on the two ground-truth clips
+    # it finds as many players as detection/ and costs a sixth of the GPU (2026-11-17, README "검출").
+    conf = a.conf if a.conf is not None else (0.1 if ids in LINKERS else 0.3)
+    print(f"검출: 우리 검출기 {a.model} (conf {conf}, imgsz {a.imgsz}, 초당 {a.rate:g}장)")
+    summary["detection"] = {"detector": "src/futsal/pipeline/detect.py", "model": a.model, "imgsz": a.imgsz, "conf": conf}
+    res = run(videos, cals, offsets, a.start, a.duration, a.out,
+              lambda cam: detect.yolo_detector(yolo_track.model_path(a.model), conf=conf, imgsz=a.imgsz), court, a.rate,
+              det_tag=f"{a.model}@{a.imgsz}/{conf}", embedder=embedder, ids=ids, video=not a.no_video, summary=summary,
+              ball=ball or None, ball_videos=ball_videos)
+    # To use 차재혁's detection/detect_person.py (its model and track() settings, ByteTrack on every frame) instead:
+    # uncomment these and track_video in run(), drop the conf / print / summary["detection"] / run(...) lines above.
+    # settings = yolo_track.read_settings()                  # detection/detect_person.py (차재혁): model and track() settings
+    # print(f"검출: {_rel(settings['file'])} → {settings['model']} {yolo_track.track_kwargs(settings)}")
+    # summary["detection"] = {"file": _rel(settings["file"]), "model": settings["model"], "track": yolo_track.track_kwargs(settings)}
+    # res = run(videos, cals, offsets, a.start, a.duration, a.out, lambda cam: yolo_track.detection_tracker(settings),
+    #           court, a.rate, det_tag=yolo_track.tag(settings), embedder=embedder, ids=ids, video=not a.no_video,
+    #           summary=summary, ball=ball or None, ball_videos=ball_videos)
     print(f"\n추적 방식 {res['tracker']}: ID {res['ids']}개 (구간 절반 이상 보인 ID {res['ids_over_half']}개), "
           f"경기장 한가운데서 생기거나 끊긴 ID {res['events']}건")
     outs = ["tracks.json", "summary.json", "events.csv"] + ([] if a.no_video else ["trackview.mp4"])
