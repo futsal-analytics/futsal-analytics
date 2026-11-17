@@ -377,17 +377,17 @@ def test_build_tracks_v2gta_end_to_end():
 
 def test_trackview_accepts_v2gta(tmp_path, monkeypatch):
     """--ids v2gta parses, asks for the ReID embedder like v2 and reaches trackview.run with ids='v2gta'. The pipeline's
-    calibration is HOGEUN's (calibration/out/<match>, only read) and its detector whatever detection/detect_person.py says."""
+    calibration is HOGEUN's (calibration/out/<match>, only read) and its detector ours (YOLO26x, conf 0.1 for v2gta)."""
     from futsal import trackview
-    from futsal.pipeline import reid, yolo_track
+    from futsal.pipeline import reid
     seen = {}
     monkeypatch.setattr(reid, "reid_embedder", lambda: "embedder")
     monkeypatch.setattr(trackview, "run", lambda *a, **kw: seen.update(kw) or {
         "tracker": kw["ids"], "ids": 0, "ids_over_half": 0, "events": 0})
     trackview.main(["--video", "a.mp4", "b.mp4", "--start", "0", "--ids", "v2gta", "--out", str(tmp_path)])
     assert seen["ids"] == "v2gta" and seen["embedder"] == "embedder"
-    assert seen["det_tag"] == yolo_track.tag(yolo_track.read_settings())
-    assert seen["det_tag"].startswith("detection/detect_person.py:")
+    assert seen["det_tag"] == "yolo26x.pt@1280/0.1"
+    assert seen["summary"]["detection"]["conf"] == 0.1
     cal = seen["summary"]["calibration"]["cam1"]
     assert cal["file"] == "calibration/out/1008/H_cam1_refined.json" and cal["t_sec"] == 60.0      # unknown video: 10/8
     assert cal["timeline"] == [{"from_s": 0.0, "shift_px": [0.0, 0.0]}]        # a.mp4 is no 10/8 video: no knocks
