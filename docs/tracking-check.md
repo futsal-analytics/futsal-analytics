@@ -49,7 +49,8 @@ python -m futsal.trackview --video C:\Users\user\dev\futsal-videos\20261008_1709
 
 | 옵션 | 뜻 |
 |---|---|
-| `--offset 0 124.27` | 카메라별 시간 차 (cam1 = 0, cam2 = `futsal.sync` 결과) |
+| `--offset 0 124.27` | 카메라별 시간 차 (cam1 = 0, cam2 = `futsal.sync` 결과). 안 주면 보정이 있는 경기(10/8, 11/3)는 `calibration/out/<경기>/sync.json`에서 읽고(시작을 맞춘 사본은 0, 원본은 잘라 낸 시각의 차), 모르는 영상은 0 |
+| `--ball-model best.pt` | 공 모델(차재혁, 팀 구글 드라이브). 주면 `ball_tracking/` 스크립트를 영상마다 한 번 돌려(영상 전체, 오래 걸림) `--out`의 `ball_cam1/` 등에 저장하고, 공 위치를 `tracks.json`에 넣습니다. 이미 만든 공 결과가 있으면 대신 `--ball c1_track.csv c2_track.csv` (다른 영상으로 만들었으면 `--ball-video`도) |
 | `--start 600 --duration 180` | cam1 영상 10:00부터 3분 |
 | `--auto-moves` | 카메라가 움직인 순간을 자동으로 찾아 보정 (영상 전체를 훑어서 몇 분 더 걸림). HOGEUN이 보정한 경기(10/8, 11/3) 영상은 그가 카메라를 따라가며 만든 경기 전체 보정을 쓰므로 이 옵션을 쓰지 않습니다. 다른 영상에서 이 옵션을 안 쓰면 카메라가 안 움직였다고 보고 계산합니다 (화면에 알려 줌) |
 | `--rate 10` | 검출·추적에 쓰는 초당 프레임 수 |
