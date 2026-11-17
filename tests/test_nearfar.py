@@ -455,8 +455,6 @@ def test_team_timeline_boxes_get_no_position_where_hogeun_found_no_court():
         assert np.array_equal(a.to_pitch(uv), b.to_pitch(uv), equal_nan=True) and (b.rms_px, b.shift) == (a.rms_px, a.shift)
 
 
-@pytest.mark.skipif(not os.path.exists(os.path.join(CALIB, "cam1", "calib_timeline.json")),
-                    reason="needs the local calib/ taps")
 def test_new_match_whole_match_file_is_used_for_the_video_it_was_made_on(tmp_path, capsys):
     """A new match has no sync.json yet: --team-calib <its folder> still gets HOGEUN's whole-match file when the video
     is the very file he tracked (its own clock); another file gets a notice and the single-frame calibration."""
@@ -483,6 +481,8 @@ def test_full_match_record_lists_every_hogeun_segment(monkeypatch):
     assert rec["clock_shift_s"] == pytest.approx(CUT_1008[2])
 
 
+@pytest.mark.skipif(not os.path.exists(os.path.join(CALIB, "cam1", "calib_timeline.json")),
+                    reason="needs the local calib/ taps")
 def test_full_match_timelines_agree_with_our_calibration(monkeypatch):
     """experiments/full_match.py now runs on HOGEUN's calibration; with its 10/8 knocks it agrees in metres with our
     tapped timeline (calib/<cam>/calib_timeline.json, only read) where both are settled: cam1 after its 2:40 knock,

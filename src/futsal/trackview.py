@@ -519,7 +519,7 @@ def main(argv=None):
     ap.add_argument("--ball", nargs="+", default=None, metavar="CSV",
                     help="공: 카메라마다 ball_tracking/track_ball.py 결과 (cam1 [cam2], 없는 카메라는 -)")
     ap.add_argument("--ball-video", nargs="+", default=None, metavar="VIDEO",
-                    help="--ball 을 만든 영상 (기본: --video). 원본과 시작을 맞춘 사본(_sync)처럼 다르면 꼭 지정")
+                    help="--ball 의 CSV를 만든 영상 (--ball 과 같이 꼭 적음. 원본과 시작을 맞춘 사본(_sync)은 시각이 다름)")
     ap.add_argument("--ball-model", default=None, metavar="best.pt",
                     help="공 모델 (차재혁, 구글 드라이브). 주면 ball_tracking/ 을 영상마다 한 번 돌려 공도 넣음 "
                          "(영상 전체를 검출해서 오래 걸림, 결과는 --out 의 ball_cam1/ 등에 저장해 다시 씀)")
@@ -559,6 +559,8 @@ def main(argv=None):
     offsets = {n: (o, d) for n, o, d in zip(names, offs, drifts)}
     if len(a.ball or []) > len(names) or (a.ball_video and len(a.ball_video) != len(a.ball or [])):
         ap.error("--ball 은 영상 수까지, --ball-video 는 --ball 과 같은 개수로 주세요")
+    if a.ball and not a.ball_video:                        # a CSV does not say which file (original or copy) it timed
+        ap.error("--ball 을 쓰면 그 CSV를 만든 영상을 --ball-video 로 적어 주세요 (원본과 사본은 시각이 잘라 낸 만큼 다릅니다)")
     if a.ball_model and (a.ball or not os.path.isfile(a.ball_model)):
         ap.error("--ball-model 은 있는 파일이어야 하고, --ball 과 같이 쓰지 않습니다")
     if a.ball_model:

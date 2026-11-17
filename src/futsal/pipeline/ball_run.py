@@ -11,6 +11,7 @@ HOGEUN's calibration use): Ultralytics' vid_stride s keeps frame i * s + s - 1 f
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import subprocess
@@ -62,8 +63,11 @@ def ball_track_csv(video: str, cam: str, model: str, out_dir: str) -> str:
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     cap.release()
     stride = stride_for(fps)
+    scripts = b"".join((BALL_TRACKING / s).read_bytes() for s in ("detect_video2.py", "merge_raw.py", "filter_static.py",
+                                                                    "track_ball.py"))
     want = {"video": nearfar.file_name(video), "video_bytes": os.path.getsize(video), "model": nearfar.file_name(model),
-            "model_bytes": os.path.getsize(model), "stride": stride, "filter_static": cam == "cam2"}
+            "model_sha1": hashlib.sha1(Path(model).read_bytes()).hexdigest(),          # a retrained best.pt has the same size
+            "scripts_sha1": hashlib.sha1(scripts).hexdigest(), "stride": stride, "filter_static": cam == "cam2"}
     final, meta_path = folder / "track_pts.csv", folder / "meta.json"
     if final.exists() and meta_path.exists() and json.loads(meta_path.read_text(encoding="utf-8")) == want:
         print(f"  {cam}: 저장된 공 추적 결과 사용 ({final})")

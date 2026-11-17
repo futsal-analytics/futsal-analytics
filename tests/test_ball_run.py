@@ -67,6 +67,9 @@ def test_his_chain_runs_once_per_video_and_is_re_timed(tmp_path, monkeypatch):
     log.write_text("")
     assert ball_run.ball_track_csv(video, "cam2", str(model), str(tmp_path / "out")) == out
     assert log.read_text() == ""                                 # cached: nothing ran
+    (bt / "track_ball.py").write_text((bt / "track_ball.py").read_text() + "\n# tuned\n")
+    ball_run.ball_track_csv(video, "cam2", str(model), str(tmp_path / "out"))
+    assert "track_ball.py" in log.read_text()                    # his script changed: run again
 
 
 def test_offsets_come_from_sync_json_for_known_matches(monkeypatch, tmp_path, capsys):

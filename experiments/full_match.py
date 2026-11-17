@@ -90,6 +90,8 @@ if __name__ == "__main__":
     names = list(meta["videos"])
     if len(a.ball or []) > len(names) or (a.ball_video and len(a.ball_video) != len(a.ball or [])):
         ap.error("--ball: at most one CSV per camera; --ball-video: as many as --ball")
+    if a.ball and not a.ball_video:                        # a CSV does not say which file (original or copy) it timed
+        ap.error("--ball needs --ball-video: the videos the CSVs were made from (an original and its copy differ by the cut)")
     ball = {c: p for c, p in zip(names, a.ball or []) if p != "-"}
     ball_videos = {c: v for c, v in zip(names, a.ball_video or []) if v != "-"}
     for c, p in ball.items():                              # before the ~10 min of tracking, not after

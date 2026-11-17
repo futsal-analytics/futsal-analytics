@@ -49,11 +49,13 @@ flowchart TD
 **준비 (한 번):**
 
 ```powershell
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128   # GPU용 torch 먼저 (안 하면 CPU용이 깔림)
 pip install -e ".[vision,reid]"        # 저장소 안에서 (calibration/, ball_tracking/ 을 저장소에서 바로 읽음)
 pip install --no-deps boxmot           # ReID. GPU용 torch 순서는 src/futsal/pipeline/reid.py 맨 위 설명
 ```
 
 - 사람 검출 모델 `yolo26x.pt`: 저장소 맨 위 폴더에 둡니다 (없으면 Ultralytics가 내려받음).
+- ReID 가중치 `osnet_ain_x1_0_msmt17.pt`: 환경변수 `FUTSAL_REID_WEIGHTS`로 경로를 주거나, 없으면 boxmot이 처음 실행할 때 내려받습니다.
 - 공 모델 `best.pt`: 차재혁 님이 팀 구글 드라이브로 공유한 파일입니다 (저장소에는 없음).
 - GPU가 있어야 현실적인 시간에 돕니다. 공 검출은 CUDA GPU가 꼭 있어야 합니다 (`ball_tracking/detect_video2.py`가 GPU 0번을 씀).
 
@@ -81,8 +83,8 @@ python -m futsal.trackview --video videos\20261103_165422_sync.mp4 videos\202611
   - 클릭 화면이 필요해서, `calibration/README.md`대로 따로 만든 가상환경(GUI가 있는 opencv-python)에서 돌립니다. 이 저장소 기본 설치는 화면 없는 opencv입니다.
   - 그다음 trackview에 `--team-calib calibration\out\1120`을 주면, 그 보정을 만든 바로 그 영상 파일일 때 경기 전체 보정을 씁니다. 원본·사본처럼 파일이 다르면 그 경기의 `sync.json`(10/8, 11/3 폴더 참고)이 있어야 합니다.
   - 보정이 없는 경기 영상은 10/8 보정으로 돌면서 알림만 띄우니, 결과를 믿으면 안 됩니다. 코트는 40×20 m만 됩니다.
-- **모르는 경기의 원본 영상 시간 차:** `python -m futsal.sync cam1.mp4 cam2.mp4`(ffmpeg 필요) 결과를 `--offset 0 <값>`으로 넣습니다.
-- **공 결과를 따로 만든 경우:** `--ball c1_track.csv c2_track.csv`(+ 다른 영상으로 만들었으면 `--ball-video`)로 넘깁니다.
+- **모르는 경기의 원본 영상 시간 차:** `python -m futsal.sync cam1.mp4 cam2.mp4`(ffmpeg 필요) 결과를 `--offset 0 <값>`으로 넣습니다. 일치하는 구간이 적다는 경고가 나오면 `--hint <대략 초>`로 다시 돌립니다 (11/3 원본은 기본값으로 69초 틀렸습니다).
+- **공 결과를 따로 만든 경우:** `--ball c1_track.csv c2_track.csv --ball-video <그 CSV를 만든 영상 두 개>`로 넘깁니다. 이렇게 넘긴 CSV는 시각을 고치지 않으니, 프레임 간격이 고르지 않은 영상(11/3 cam1)은 `--ball-model`로 돌리세요.
 
 **결과 (`--out` 폴더):**
 
@@ -94,9 +96,9 @@ python -m futsal.trackview --video videos\20261103_165422_sync.mp4 videos\202611
 | `trackview.mp4` | 확인 영상: 두 카메라 화면 + 2D 지도 (`--no-video`면 안 만듦). 사람이 찍혀 있으니 저장소에 넣지 않습니다 |
 | `det_cam1.json`, `ball_cam1/` 등 | 검출 결과 캐시. 같은 설정으로 다시 돌리면 검출을 건너뜁니다 |
 
-**2D 지도로 보기:** 저장소 맨 위에서 `python -m http.server 8080`을 켜고 `http://localhost:8080/web/viewer/?src=/trackview/tracks.json`을 엽니다.
+**2D 지도로 보기:** 저장소 맨 위에서 `python -m http.server 8080 --bind 127.0.0.1`을 켜고 (이 PC에서만 열림) `http://localhost:8080/web/viewer/?src=/trackview/tracks.json`을 엽니다.
 
-**53분 전체 연구용 (저장된 검출로, 추적만 약 9~10분):** `python experiments/full_match.py --out experiments/full_match_team`. 검출은 미리 만든 `experiments/cache_full26`(trackview와 같은 우리 설정)을 씁니다. 공은 `--ball c1_track.csv c2_track.csv --ball-video <공을 돌린 영상>`으로 넣습니다.
+**53분 전체 연구용 (10/8, 저장된 검출로, 추적만 약 9~10분):** `python experiments/full_match.py --out experiments/full_match_team`. 검출은 미리 만든 `experiments/cache_full26`(trackview와 같은 우리 설정)을 쓰는데, 저장소에는 없어서(`.gitignore`) 그 캐시가 있는 PC에서만 돕니다. 새로 만들려면 `experiments/build_cache.py --start 125 --duration 3185 --out experiments/cache_full26`처럼 구간을 적어야 합니다 (기본값은 6분짜리). 공은 `--ball c1_track.csv c2_track.csv --ball-video <공을 돌린 영상>`으로 넣습니다.
 
 옵션 전체와 확인 방법은 [추적 결과 영상 만들기](docs/tracking-check.md)에 있습니다.
 
@@ -109,7 +111,7 @@ python -m futsal.trackview --video videos\20261103_165422_sync.mp4 videos\202611
 | 정답 클립 IDF1 (9:00 / 29:00) | 0.927 / 0.875 |
 | 10/8 53분 | ID 24개, 80% 넘게 같은 ID로 보인 선수 6명, 한가운데서 생기거나 끊긴 ID 17번(분당 0.32), 두 카메라 위치 차 0.83 → 0.184 m |
 | 11/3 10:00부터 1분 (실제 영상, 명령 하나) | ID 11개, 사건 1번, 두 카메라 위치 차 0.89 → 0.18 m, PC(RTX 2070 SUPER)에서 173초 |
-| 공 스크립트 (11/3 cam1 10초) | 우리 환경에서 다섯 단계가 끝까지 돌고, 300프레임 중 검출 240, 예측 8 |
+| 공 스크립트 (11/3 10초 클립) | 우리 환경에서 끝까지 돌고(cam1 네 단계, cam2는 예비공 지우기까지 다섯 단계), cam1 300프레임 중 검출 240, 예측 8 |
 
 **검출 비교** (2026-11-17, 정답 클립 프레임 2400장, IoU 0.5):
 
