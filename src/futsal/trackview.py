@@ -1,6 +1,6 @@
 """두 영상 → 선수 추적 한 번에: 검출 → ReID → 좌표 변환(calibration/) → 시간 맞추기 → 추적 v2 → 결과
 
-  python -m futsal.trackview --video cam1.mp4 cam2.mp4 --offset 0 124.27 --start 600 --duration 180 --out trackview
+  python -m futsal.trackview --video cam1.mp4 cam2.mp4 --start 600 --duration 180 --out trackview [--ball-model best.pt]
 
 단계와 코드:
   검출       우리 검출기 (pipeline/detect.py): YOLO26x COCO 사전학습, conf 0.1 (--ids v2 / v2gta), 초당 --rate 장.
@@ -11,13 +11,16 @@
              영상이 속한 경기(calibration/out/<경기>/sync.json)의 경기 전체 시간별 보정 calib_cam<N>.json 을 영상
              시각에 맞춰 씀 (카메라가 움직여도 HOGEUN이 따라감, 코트를 못 찾은 구간은 좌표 없음). 그 파일이 없으면
              한 프레임 보정 H_cam<N> + 10/8 기록된 카메라 움직임, 또는 --auto-moves
-  시간 맞추기 --offset (python -m futsal.sync 결과). 10분 이상이면 선수 위치로 두 폰 시계 어긋남을 한 번 더 보정
+  시간 맞추기 --offset. 안 주면 알려진 경기는 sync.json 에서 (시작을 맞춘 사본은 0, 원본은 잘라 낸 시각 차),
+             모르는 영상은 0 (원본이면 python -m futsal.sync 결과를 넣음). 15분 이상이면 선수 위치로 두 폰 시계
+             어긋남을 한 번 더 보정
   추적       추적 v2 (아래 --ids)
-  공         --ball: ball_tracking/ (차재혁) 의 track_ball.py 결과를 선수와 같은 보정·시계·카메라 정렬로 지도에 올림
-             (pipeline/ball.py; ball_tracking/to_court.py 는 쓰지 않음)
+  공         --ball-model best.pt: ball_tracking/ (차재혁) 스크립트를 그대로 영상마다 한 번 돌리고 (pipeline/ball_run.py,
+             프레임마다 실제 시각으로 맞춤), --ball: 따로 돌린 track_ball.py 결과. 둘 다 선수와 같은 보정·시계·카메라
+             정렬로 지도에 올림 (pipeline/ball.py; ball_tracking/to_court.py 는 쓰지 않음)
 
 결과 (--out 폴더):
-  tracks.json    선수별 위치, --ball 이면 공 위치도 (web/viewer 로 재생 가능)
+  tracks.json    선수별 위치, 공을 넣었으면 공 위치도 (web/viewer 로 재생 가능)
   summary.json   선수별 이동거리·속도·보인 비율, 쓴 검출 설정과 보정 파일
   events.csv     ID가 경기장 한가운데서 새로 생기거나 끊긴 순간 (= ID가 바뀌었을 가능성이 큰 곳) 목록
   trackview.mp4  확인 영상. 위: 두 카메라 화면에 선수 ID, 아래: 2D 지도 + ID 사건 목록 (--no-video 면 안 만듦)
@@ -35,7 +38,7 @@
               우리 탭 보정으로 잰 값입니다 (같은 검출에 calibration/ 보정이면 4명).
   v2gta       같은 조각을 정원 없이 하나씩 이어 붙이는 방식. 6분 구간에서는 같은 팀 선수끼리 엇갈릴 때 ID가 바뀌는
               일이 가장 적었지만, 경기 전체에서는 ID가 잘게 나뉩니다 (53분에 86개). 짧은 구간 확인용. ReID 필요.
-  두 방식 모두 10분 이상 구간이면 선수 위치로 두 폰의 시계 어긋남을 먼저 재서 보정합니다 (10/8 두 폰은 어긋남 없음).
+  두 방식 모두 15분 이상 구간이면 선수 위치로 두 폰의 시계 어긋남을 먼저 재서 보정합니다 (10/8 두 폰은 어긋남 없음).
   appearance  예전 방식 (발 위치 + 색 특징). ReID를 쓸 수 없으면 v2 대신 자동으로 이 방식을 씁니다.
   motion      움직임만 보는 가장 오래된 방식.
 --no-reid 는 ReID 계산을 건너뛰고 예전 방식(appearance)으로 추적합니다.
@@ -54,7 +57,7 @@ import numpy as np
 from . import nearfar
 from .court import Court
 from .homography import Calibration, CalibrationTimeline, calibration_at, timeline_from_json
-from .pipeline import detect, yolo_track
+from .pipeline import ball_run, detect, yolo_track
 from .pipeline.align import corrected_sync
 from .pipeline.ball import ball_track, clock_shift, read_track
 from .pipeline.run import IDS, LINKERS, build_tracks
@@ -88,6 +91,16 @@ def team_calib_dir(video: str | None) -> str:
     return found[0] if found else str(nearfar.TEAM_OUT)
 
 
+def sync_offsets(videos: list[str]) -> list[float] | None:
+    """--offset for videos that are cam1, cam2, ... of one match in calibration/out (nearfar.find_video): the
+    start-aligned copies share one clock, so cam1 time = camN time + (cam1 file's shift - camN file's shift), i.e.
+    0 for the copies and the difference of the cuts for the originals (10/8: 124.257 s). None otherwise."""
+    found = [nearfar.find_video(v) for v in videos]
+    if any(f is None for f in found) or len({f[0] for f in found}) != 1 or [f[1] for f in found] != list(range(1, len(found) + 1)):
+        return None
+    return [round(found[0][2] - f[2], 4) for f in found]
+
+
 def load_team_calibration(n: int, video: str | None = None, auto_moves: bool = False, cache_dir: str | None = None,
                           out_dir: str | None = None) -> Calibration | CalibrationTimeline:
     """Camera n of HOGEUN's calibration in our pitch coordinates (futsal.nearfar). `out_dir` defaults to the folder of
@@ -110,6 +123,16 @@ def load_team_calibration(n: int, video: str | None = None, auto_moves: bool = F
               f"(영상 시각 = 보정 시각 + {found[2]:.3f}초, 코트를 못 찾은 구간은 좌표 없음)"
               + (" --auto-moves 는 쓰지 않습니다" if auto_moves else ""))
         return tl
+    tracked = nearfar.tracked_file(n, out_dir)
+    if found is None and video and os.path.exists(tracked):      # a new match without a sync.json yet
+        with open(tracked, encoding="utf-8") as f:
+            made_on = nearfar.file_name(json.load(f).get("video", ""))
+        if made_on.lower() == nearfar.file_name(video).lower():    # tracked on this very file: its own clock
+            print(f"  {nearfar.file_name(video)}: HOGEUN 시간별 보정 {_rel(tracked)} (이 영상으로 만든 것, 코트를 못 찾은 "
+                  "구간은 좌표 없음)")
+            return nearfar.team_timeline(n, out_dir, 0.0)
+        print(f"  주의: {_rel(tracked)} 은 {made_on} 으로 만든 시간별 보정이라 {nearfar.file_name(video)} 에는 쓰지 "
+              "않습니다. 같은 영상을 넣거나 그 경기의 sync.json 을 만들면 씁니다")
     cal = nearfar.load_team(n, out_dir)
     at_s = cal.team.get("t_sec")
     made = nearfar.find_video(cal.team["video"]) if cal.team.get("video") else None
@@ -497,6 +520,9 @@ def main(argv=None):
                     help="공: 카메라마다 ball_tracking/track_ball.py 결과 (cam1 [cam2], 없는 카메라는 -)")
     ap.add_argument("--ball-video", nargs="+", default=None, metavar="VIDEO",
                     help="--ball 을 만든 영상 (기본: --video). 원본과 시작을 맞춘 사본(_sync)처럼 다르면 꼭 지정")
+    ap.add_argument("--ball-model", default=None, metavar="best.pt",
+                    help="공 모델 (차재혁, 구글 드라이브). 주면 ball_tracking/ 을 영상마다 한 번 돌려 공도 넣음 "
+                         "(영상 전체를 검출해서 오래 걸림, 결과는 --out 의 ball_cam1/ 등에 저장해 다시 씀)")
     ap.add_argument("--out", default="trackview")
     a = ap.parse_args(argv)
     # if len(a.calib) != len(a.video):
@@ -511,7 +537,13 @@ def main(argv=None):
         if not os.path.exists(nearfar.team_file(i + 1, d)):
             ap.error(f"{d} 에 cam{i + 1} 보정 파일(H_cam{i + 1}.json)이 없습니다")
     names = [f"cam{i + 1}" for i in range(len(a.video))]
-    offs = a.offset or [0.0] * len(names)
+    offs = a.offset or sync_offsets(a.video)
+    if a.offset is None and offs is not None and len(offs) > 1:
+        print(f"시간 차: {_rel(os.path.join(nearfar.find_video(a.video[0])[0], 'sync.json'))} 에서 읽음 ("
+              + ", ".join(f"{n} {o:+.3f}초" for n, o in zip(names, offs)) + ")")
+    elif a.offset is None and len(names) > 1:
+        print("시간 차를 모르는 영상이라 0으로 둡니다. 원본 영상이면 python -m futsal.sync 결과를 --offset 에 넣으세요")
+    offs = offs or [0.0] * len(names)
     drifts = a.drift or [0.0] * len(names)
     court = Court.parse(a.court)
     os.makedirs(a.out, exist_ok=True)
@@ -527,6 +559,12 @@ def main(argv=None):
     offsets = {n: (o, d) for n, o, d in zip(names, offs, drifts)}
     if len(a.ball or []) > len(names) or (a.ball_video and len(a.ball_video) != len(a.ball or [])):
         ap.error("--ball 은 영상 수까지, --ball-video 는 --ball 과 같은 개수로 주세요")
+    if a.ball_model and (a.ball or not os.path.isfile(a.ball_model)):
+        ap.error("--ball-model 은 있는 파일이어야 하고, --ball 과 같이 쓰지 않습니다")
+    if a.ball_model:
+        import torch
+        if not torch.cuda.is_available():                  # ball_tracking/detect_video2.py asks for GPU 0
+            ap.error("공 검출(ball_tracking/detect_video2.py)은 CUDA GPU가 있어야 돕니다. 공 결과를 다른 PC에서 만들었으면 --ball 로 넘기세요")
     ball = {n: p for n, p in zip(names, a.ball or []) if p != "-"}
     ball_videos = {n: v for n, v in zip(names, a.ball_video or []) if v != "-"}
     for n, p in ball.items():                              # before hours of detection, not after
@@ -550,6 +588,9 @@ def main(argv=None):
     summary = {"calibration": {n: calibration_record(i + 1, cals[n], calib_dirs[i], tapped[i]) for i, n in enumerate(videos)}}
     # Our detector (pipeline/detect.py: YOLO26x COCO predict at --rate, conf 0.1 for v2): on the two ground-truth clips
     # it finds as many players as detection/ and costs a sixth of the GPU (2026-11-17, README "검출").
+    if a.ball_model:                                       # 차재혁's ball_tracking/ on each whole video, cached in --out
+        ball = {n: ball_run.ball_track_csv(v, n, a.ball_model, a.out) for n, v in videos.items()}
+        summary["ball_model"] = nearfar.file_name(a.ball_model)
     conf = a.conf if a.conf is not None else (0.1 if ids in LINKERS else 0.3)
     print(f"검출: 우리 검출기 {a.model} (conf {conf}, imgsz {a.imgsz}, 초당 {a.rate:g}장)")
     summary["detection"] = {"detector": "src/futsal/pipeline/detect.py", "model": a.model, "imgsz": a.imgsz, "conf": conf}

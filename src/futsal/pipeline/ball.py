@@ -35,6 +35,9 @@ def clock_shift(ball_video: str, player_video: str) -> float:
     if (a is None) != (b is None) or (a is not None and a[:2] != b[:2]):
         raise ValueError(f"공 영상 {nearfar.file_name(ball_video)} 와 선수 영상 {nearfar.file_name(player_video)} 이 "
                          "같은 경기·같은 카메라가 아닙니다 (--ball-video 확인)")
+    if a is None and nearfar.file_name(ball_video).lower() != nearfar.file_name(player_video).lower():
+        raise ValueError(f"공 영상 {nearfar.file_name(ball_video)} 와 선수 영상 {nearfar.file_name(player_video)} 의 "
+                         "시각 차를 알 수 없습니다 (sync.json 에 없는 영상은 같은 파일이어야 합니다)")
     return b[2] - a[2] if a else 0.0
 
 

@@ -2,7 +2,7 @@
 
 Both box-level trackers start the same way (track_cams):
 
-    build_cam_boxes per camera -> refine_clock (second camera onto the first one's clock, matches >= 10 min) ->
+    build_cam_boxes per camera -> refine_clock (second camera onto the first one's clock, clips >= 15 min) ->
     assign_teams -> align_cameras -> ...
 
 ids="v2" (the default whenever every camera has ReID): the closed-set linker, 5 + 1 slots per team ('final_d'):
@@ -135,8 +135,8 @@ def track_cams(cams: dict, court: Court, rate: float = 10.0, closed_params=None,
     link_gta.link_tracklets_windowed(gta_params). Both linkers skip their own smoothing by default: the RTS
     refinement replaces those positions (closed: also no re-fusion; gta: GtaParams(smooth='none')).
     clock_refine: first move the second camera onto the first one's clock with the players (align.refine_clock: a
-    slow drift between the phones' video clocks, which the audio sync cannot see; clips shorter than ~10 minutes are
-    left as they are).
+    slow drift between the phones' video clocks, which the audio sync cannot see; clips shorter than 15 minutes are
+    left as they are: 300 s windows whose centres must span MIN_CLOCK_SPAN_S).
     `info` receives "clock", "teams", "alignment", "tracklets", "solver" and "identities" (see build_tracks_v2),
     plus "source" (sources.SourceStats) for the open set."""
     from .align import align_cameras, refine_clock

@@ -53,6 +53,9 @@ def test_ball_lands_on_the_players_grid_and_pitch_frame(tmp_path):
     assert rec["both_detected_median_m"] < 0.05
     with pytest.raises(ValueError):                    # cam2's copy given for cam1: the ball would move by the cut
         clock_shift(copies["cam2"], videos["cam1"])
+    assert clock_shift(r"D:\new\a.mp4", r"C:\x\a.mp4") == 0.0          # unknown match, same file: same clock
+    with pytest.raises(ValueError):                    # unknown match, another file (a trimmed copy?): no way to know
+        clock_shift(r"D:\new\a_trim.mp4", r"D:\new\a.mp4")
     (tmp_path / "ball_cam1.csv").write_text("t,status,track_id,u,v,conf,x_m,y_m\n600.0,detected,1,900,500,0.8,10,5\n")
     with pytest.raises(ValueError):                    # to_court.py's output instead of track_ball.py's: refused
         read_track(str(tmp_path / "ball_cam1.csv"))
