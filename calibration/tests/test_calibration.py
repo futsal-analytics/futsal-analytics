@@ -1322,3 +1322,72 @@ def test_camera_check_accepts_real_calibrations_and_rejects_impossible_cameras()
     assert ki.decide([r_ok] * 5)[2] == "ok"
     assert ki.decide([r_bad] * 5)[2] == "low_confidence"
     assert ki.decide([r_bad] * 5, check_camera=False)[2] == "ok"
+
+
+def test_auto_match_virtual_clicks_reproject_exactly(monkeypatch, tmp_path):
+    from dataclasses import asdict
+
+    import auto_match
+    from calib_core import to_world
+
+    spec = CourtSpec()
+    for half, mirror in (("east", False), ("west", True)):
+        S = np.eye(3) if half == "east" else np.diag([-1.0, -1.0, 1.0])
+        H = np.linalg.inv(G @ S)  # 이미지 -> 실제 코트 (west는 코트를 180도 돌려 본다)
+        cal = {"half": half, "mirror": mirror, "spec": asdict(spec), "video": "v.mp4",
+               "t_sec": 5.0, "H_near": (H / H[2, 2]).tolist(), "H_far": (H / H[2, 2]).tolist(), "source": "auto",
+               "far_model": "free", "version": 2, "segments": [{"t0": 0.0, "t1": 10.0, "source": "auto"}]}
+        names, img_pts, world = auto_match.virtual_clicks(cal, (1920, 1080))
+        assert len(names) == len(img_pts) == 7 and any(p is not None for p in img_pts)
+        Gi = front_facing(np.linalg.inv(np.array(cal["H_near"])))
+        for i, xy in world["near"].items():  # 팀 nearfar.from_team이 하는 재투영: 잔차 0
+            assert np.allclose(project(Gi, np.array([xy]))[0][0], img_pts[int(i)], atol=0.02)
+        assert all(img_pts[int(i)] is not None for region in world.values() for i in region)
+        assert world["near"]["0"] == list(map(float, to_world((0.0, -spec.width / 2 if mirror else spec.width / 2), half)))
+
+        monkeypatch.setattr(auto_match, "video_size", lambda path: (1920, 1080))
+        paths, n_pts = auto_match.write_outputs(cal, str(tmp_path), 1)
+        with open(paths["anchor"], encoding="utf-8") as f:
+            anchor = json.load(f)
+        assert "segments" not in anchor and anchor["clicks"] == "virtual" and anchor["far_model"] == "free"
+        with open(paths["calib"], encoding="utf-8") as f:
+            assert json.load(f)["segments"] == cal["segments"]
+
+
+def test_auto_match_sync_record_round_trips_through_court_map_and_team_offsets(monkeypatch, tmp_path):
+    import auto_match
+    import court_map
+
+    monkeypatch.setattr(auto_match.cv2, "VideoCapture", lambda path: _FakeCap(3000 if "a" in os.path.basename(path) else 2900))
+    monkeypatch.setattr(auto_match, "frames_of", lambda path: 0)
+    for offset in (12.5, -7.25):  # cam1 시각 = cam2 시각 + offset
+        rec = auto_match.sync_record({1: str(tmp_path / "20261120_100000a.mp4"), 2: str(tmp_path / "20261120_100012b.mp4")},
+                                     offset, {"method": "test"})
+        s = {int(n): rec["videos"][name]["source_time_of_output_0_s"] for n, name in rec["cameras"].items()}
+        assert min(s.values()) == 0.0 and s[1] - s[2] == pytest.approx(offset)  # 팀 trackview: 원본끼리 시간 차 = 두 값의 차
+        assert rec["cameras"]["1"] == "20261120_100000a_sync.mp4" and all(v["virtual"] for v in rec["videos"].values())
+        # 원본 시각의 보정 -> court_map.load가 사본 시각으로 옮긴다 (같은 순간 = 사본 시각 0)
+        out = tmp_path / f"m{offset}"
+        os.makedirs(out)
+        for n in (1, 2):
+            cal = {"half": "east", "video": str(tmp_path / ("20261120_100000a.mp4" if n == 1 else "20261120_100012b.mp4")),
+                   "t_sec": 100.0, "H_near": np.eye(3).tolist(), "H_far": np.eye(3).tolist(), "version": 2,
+                   "segments": [{"t0": 0.0, "t1": 200.0, "source": "auto", "H_near": np.eye(3).tolist(),
+                                 "H_far": np.eye(3).tolist()}]}
+            with open(out / f"calib_cam{n}.json", "w", encoding="utf-8") as f:
+                json.dump(cal, f)
+        with open(out / "sync.json", "w", encoding="utf-8") as f:
+            json.dump(rec, f)
+        for n in (1, 2):
+            assert court_map.load(n, str(out))["t_sec"] == pytest.approx(100.0 - s[n])
+
+
+class _FakeCap:
+    def __init__(self, frames):
+        self.frames = frames
+
+    def get(self, prop):
+        return {cv2.CAP_PROP_FRAME_COUNT: self.frames, cv2.CAP_PROP_FPS: 10.0}.get(prop, 0)
+
+    def release(self):
+        pass
