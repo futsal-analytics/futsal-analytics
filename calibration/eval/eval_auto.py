@@ -15,7 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from auto_init import auto_calibrate, consensus, median_of  # noqa: E402
 from calib_core import HALF_SIGN, Source  # noqa: E402
 from court import spec_of  # noqa: E402
-from court_map import load  # noqa: E402
+from court_map import homographies_at, load  # noqa: E402
+from harness import log_eval  # noqa: E402
 
 TIMES = tuple(range(200, 3200, 200))  # 15개 시점
 
@@ -45,21 +46,23 @@ def error_m(H_auto, H_true, half, spec, size=(1920, 1080)):
 
 def main(args):
     cams = [int(args[args.index("--cam") + 1])] if "--cam" in args else [1, 2]
+    log_eval("eval_auto", cams)  # G4: 결과만 본다 (설정을 고르지 않음), eval/usage_log.jsonl
     for n in cams:
         cal = load(n)
         spec = spec_of(cal)
         src = Source(cal["video"])
         results, valid_times = [], []
         for t in TIMES:
-            seg = truth_segment(cal, t) and truth_segment(cal, t + 12)
-            if seg is None:
+            seg = truth_segment(cal, t)  # median_of는 t ~ t+12 s 프레임: 창 전체가 한 구간일 때만 그 구간이 정답
+            if seg is None or truth_segment(cal, t + 12) is not seg:
                 continue
             frame = median_of(src, t)
             t0 = time.time()
             r = auto_calibrate(frame, cal["half"], spec)
-            r["t_sec"], r["truth"] = float(t), seg["H_near"]
+            H_true = homographies_at(seg, t + 6)[0]  # 창 가운데 시각의 정답: 구간 안의 느린 밀림(drift)까지 반영
+            r["t_sec"], r["truth"] = float(t), H_true.tolist()
             if r["H_near"] is not None:
-                r["err"] = error_m(r["H_near"], seg["H_near"], cal["half"], spec)
+                r["err"] = error_m(r["H_near"], H_true, cal["half"], spec, frame.shape[1::-1])
             results.append(r)
             valid_times.append(t)
             err = f"err med={r['err'][0]:6.2f} p95={r['err'][1]:6.2f}" if "err" in r else "err -"

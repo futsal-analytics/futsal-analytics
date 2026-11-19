@@ -1391,3 +1391,141 @@ class _FakeCap:
 
     def release(self):
         pass
+
+
+def test_solve_half_degenerate_clicks_raise_value_error():
+    """한 직선 위의 클릭은 TypeError가 아니라 ValueError (calib_service가 사용자 메시지로 바꾼다)."""
+    lms = click_landmarks()[:5]
+    img = np.array([[100.0, 100.0], [200, 200], [300, 300], [400, 400], [500, 500]])
+    with pytest.raises(ValueError):
+        solve_half(img, lms, "east")
+
+
+def test_result_to_original_keeps_pixel_to_court():
+    """작업 해상도 결과를 원본 픽셀로 바꾼 뒤에도 같은 지점이 같은 코트 좌표로 간다 (drift 포함)."""
+    scale = 0.5  # 4K -> 1080 작업 해상도
+    drift = [[0.0, 0.0, 0.0], [10.0, 3.0, -2.0]]
+    work = {"version": 2, "half": "east", "spec": json.loads(json.dumps(CourtSpec().__dict__)),
+            "H_near": H_NEAR.tolist(), "H_far": H_NEAR.tolist(), "img_pts": [[100.0, 50.0], None],
+            "segments": [{"t0": 0.0, "t1": 10.0, "source": "anchor", "H_near": H_NEAR.tolist(), "H_far": H_NEAR.tolist(),
+                          "shift": [4.0, -6.0], "drift": drift, "score": 1.0}]}
+    work_px = np.array([[900.0, 600.0], [1200.0, 700.0]])
+    expect = pixel_to_court(json.loads(json.dumps(work)), work_px, t=7.0)
+    orig = svc._result_to_original(json.loads(json.dumps(work)), scale)
+    got = pixel_to_court(orig, work_px / scale, t=7.0)
+    assert np.allclose(got, expect, atol=1e-6)
+    assert orig["img_pts"] == [[200.0, 100.0], None]
+    assert orig["segments"][0]["shift"] == [8.0, -12.0]
+    assert orig["segments"][0]["drift"][1] == [10.0, 6.0, -4.0]
+
+
+def test_auto_match_sync_record_rejects_same_file_names_and_unreadable_fps(monkeypatch, tmp_path):
+    """두 카메라 파일 이름이 같거나 fps를 못 읽으면 sync.json을 조용히 틀리게 쓰지 않고 RuntimeError."""
+    import auto_match
+
+    monkeypatch.setattr(auto_match, "frames_of", lambda path: 0)
+    monkeypatch.setattr(auto_match.cv2, "VideoCapture", lambda path: _FakeCap(3000))
+    with pytest.raises(RuntimeError, match="파일 이름"):
+        auto_match.sync_record({1: str(tmp_path / "a" / "video.mp4"), 2: str(tmp_path / "b" / "video.mp4")}, 1.0, {})
+
+    class NoFps(_FakeCap):
+        def get(self, prop):
+            return 0
+    monkeypatch.setattr(auto_match.cv2, "VideoCapture", lambda path: NoFps(3000))
+    with pytest.raises(RuntimeError, match="fps"):
+        auto_match.sync_record({1: str(tmp_path / "a.mp4"), 2: str(tmp_path / "b.mp4")}, 1.0, {})
+
+
+def test_track_cli_keeps_cameras_around_options():
+    """옵션 사이의 카메라 번호도 받는다 (예전 손 파싱은 '1 --step 5 2'에서 2를 버렸다)."""
+    import track as tr
+
+    a = tr.parse_args(["1", "--step", "5", "2", "--far-model", "free", "--drift-only"])
+    assert a.cams == [1, 2] and a.step == 5.0 and a.far_model == "free" and a.drift_only and not a.refit_far
+    assert tr.parse_args([]).cams == [] and tr.parse_args([]).step == tr.TrackConfig.step
+    with pytest.raises(SystemExit):
+        tr.parse_args(["--far-model", "bogus"])
+
+
+def test_clear_dataset_dir_refuses_foreign_files(tmp_path):
+    """--out을 잘못 줘도 데이터셋이 아닌 파일(학습 모델 등)이 있는 폴더는 지우지 않는다."""
+    import make_dataset as md
+
+    ds = tmp_path / "dataset"
+    (ds / "images" / "train").mkdir(parents=True)
+    (ds / "data.yaml").write_text("x", encoding="utf-8")
+    md.clear_dataset_dir(str(ds), ("images", "labels", "data.yaml"))
+    assert not ds.exists()
+    md.clear_dataset_dir(str(ds), ("images",))  # 없는 폴더: 아무것도 안 함
+
+    train = tmp_path / "train"
+    (train / "images").mkdir(parents=True)
+    (train / "best.pt").write_bytes(b"weights")
+    with pytest.raises(SystemExit, match="best.pt"):
+        md.clear_dataset_dir(str(train), ("images", "labels", "data.yaml"))
+    assert (train / "best.pt").exists()
+
+
+def test_eval_pool_times_skip_windows_spanning_a_camera_move():
+    """중앙값 창(t ~ t+WINDOW) 안에 구간 경계가 있으면 정답 행렬이 다른 구간 것이라 평가 시점에서 뺀다."""
+    import eval_autocal as ea
+
+    eye = np.eye(3).tolist()
+    cal = {"segments": [{"t0": 0.0, "t1": 500.0, "source": "auto", "H_near": eye, "H_far": eye},
+                        {"t0": 500.0, "t1": 1000.0, "source": "auto", "H_near": eye, "H_far": eye}]}
+    times = ea.pool_times(cal, 1000.0, 200)
+    assert times and not any(t < 500.0 < t + ea.WINDOW for t in times)
+
+
+def test_court_map_file_name_handles_both_separators():
+    """저장된 경로가 다른 OS에서 만들어졌어도 파일 이름을 뽑는다 (os.path.basename은 Linux에서 \를 못 자른다)."""
+    from court_map import file_name
+
+    assert file_name(r"D:\videos\1008\a_sync.mp4") == "a_sync.mp4"
+    assert file_name("/mnt/d/videos/a_sync.mp4") == "a_sync.mp4"
+    assert file_name("a_sync.mp4") == "a_sync.mp4"
+
+
+def test_eval_autocal_refuses_to_overwrite_result_with_other_settings(tmp_path):
+    """--runs 10 같은 짧은 시험 실행이 300회 기준 결과를 몰래 덮어쓰지 않는다."""
+    from types import SimpleNamespace
+
+    import eval_autocal as ea
+
+    path = tmp_path / "autocal_model_1008.json"
+    a = SimpleNamespace(cams=[1, 2], pool=15, windows=5, runs=300, noise=1.5, seed=0, force=False)
+    assert ea.settings_diff(str(path), a) == ""  # 파일 없음
+    path.write_text(json.dumps({"settings": vars(a)}), encoding="utf-8")
+    assert ea.settings_diff(str(path), a) == ""  # 같은 설정
+    assert ea.settings_diff(str(path), SimpleNamespace(**{**vars(a), "runs": 10})) == "runs 300 -> 10"
+
+
+def test_val_match_cannot_be_used_for_tuning():
+    """G4: 검증 회차(1008)로는 설정·문턱을 고르지 않는다. 결과만 보는 실행은 val, 학습 회차는 report."""
+    import harness as hz
+
+    assert hz.eval_purpose("1008") == "val" and hz.eval_purpose("1103") == "report"
+    assert hz.eval_purpose("1008", tuning=True) == "tune"
+    with pytest.raises(SystemExit, match="1008"):
+        hz.use_match("1008", "tune", [])  # 기록 전에 멈춘다
+
+
+def test_eval_autocal_setting_flags_count_as_tuning():
+    from types import SimpleNamespace
+
+    import eval_autocal as ea
+
+    base = dict(anchor_w=None, far_anchor_w=None, radii=None, far_model=None, seg_noise="")
+    assert not ea.is_tuning(SimpleNamespace(**base))
+    assert not ea.is_tuning(SimpleNamespace(**{**base, "seg_noise": "grow=2"}))  # 시험 조건이지 설정 실험이 아님
+    for k, v in (("anchor_w", 10.0), ("far_anchor_w", 30.0), ("radii", [8, 5]), ("far_model", "free")):
+        assert ea.is_tuning(SimpleNamespace(**{**base, k: v})), k
+
+
+def test_gate_analysis_tunes_only_on_train_matches():
+    import gate_analysis as ga
+
+    splits = {"train": ["1103"], "tune": [], "val": ["1008"], "blind": []}
+    assert ga.split_matches(["1008", "1103"], splits) == (["1103"], ["1008"])
+    with pytest.raises(SystemExit):
+        ga.split_matches(["1008"], splits)  # 검증 회차만 있으면 문턱을 고를 수 없다

@@ -5,7 +5,6 @@
 지점 이름은 카메라에서 본 기준(make_dataset.keypoints, 동쪽 기준 좌표)이고, 실제 방향은 half로 정한다.
 """
 import os
-import sys
 
 import cv2
 import numpy as np
@@ -13,11 +12,9 @@ import numpy as np
 from auto_init import ROT180, camera_from, consensus, median_of
 from calib_core import front_facing, in_half, to_world
 from court import DEFAULT_SPEC
+from court_marks import keypoints
 from refine import CIRCLE_PAD, FAR_MARGIN, icp_align, icp_align_far, ridge_map, sample_model
 from track import line_score
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "train"))
-from make_dataset import keypoints  # noqa: E402
 
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train", "best.pt")
 CONF_MIN = 0.5  # 이보다 낮은 키포인트는 화면에 없다고 본다
@@ -41,15 +38,14 @@ CAMERA_MAX_LOG_RATIO = 0.18  # 두 축 스케일 비 1.2 이내
 CAMERA_HEIGHT_M = (1.0, 5.0)  # 삼각대 위의 폰
 CAMERA_HFOV_DEG = (45.0, 90.0)  # 폰 기본(비광각) 렌즈
 
-_model = None
+_models = {}  # 경로별: 다른 경로를 주면 처음 불러온 모델을 돌려주지 않는다 (모델 A/B 비교)
 
 
 def load_model(path=MODEL_PATH):
-    global _model
-    if _model is None:
+    if path not in _models:
         from ultralytics import YOLO
-        _model = YOLO(path)
-    return _model
+        _models[path] = YOLO(path)
+    return _models[path]
 
 
 def detect(frame, model=None, imgsz=960):

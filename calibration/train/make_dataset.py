@@ -38,22 +38,8 @@ sys.path.insert(0, os.path.join(ROOT, "eval"))
 from harness import check_purpose, log_usage, read_splits, rel_to_root  # noqa: E402
 
 
-def keypoints(spec=DEFAULT_SPEC):
-    """(이름, 동쪽을 바라보는 카메라 기준 좌표). 사람이 볼 수 있는 코트 표시만 쓴다."""
-    L2, W2, r, g, p = spec.length / 2, spec.width / 2, spec.center_r, spec.goal_w / 2, spec.penalty_r
-    return [
-        ("halfway_left", (0.0, W2)), ("halfway_right", (0.0, -W2)),
-        ("circle_halfway_left", (0.0, r)), ("circle_halfway_right", (0.0, -r)),
-        ("near_10m", (-(L2 - 10.0), 0.0)), ("far_10m", (L2 - 10.0, 0.0)),
-        ("far_corner_left", (L2, W2)), ("far_corner_right", (L2, -W2)),
-        ("far_arc_left", (L2, g + p)), ("far_arc_right", (L2, -(g + p))),
-        ("far_post_left", (L2, g)), ("far_post_right", (L2, -g)),
-        ("near_penalty_front", (-(L2 - p), 0.0)),
-    ]
-
-
-# 좌우 반전 증강에서 서로 바뀌는 지점의 인덱스
-FLIP_IDX = [1, 0, 3, 2, 4, 5, 7, 6, 9, 8, 11, 10, 12]
+# 키포인트 정의는 추론(keypoint_init)과 함께 쓰므로 court_marks에 있다. 여기서도 같은 이름으로 쓴다 (md.keypoints 등)
+from court_marks import FLIP_IDX, keypoints  # noqa: E402,F401
 
 
 def project_keypoints(seg, half, cam, spec=DEFAULT_SPEC, size=(1920, 1080), t=None, match="1008"):
@@ -125,6 +111,27 @@ def draw_preview(frame, kp, names):
     return view
 
 
+def clear_dataset_dir(path, expected):
+    """데이터셋 폴더 path를 비운다. 이 스크립트가 만드는 항목(expected)만 들어 있을 때만 지우고, 다른 것이 있으면 멈춘다.
+    --out을 잘못 줘서(예: --out train) git에 없는 학습 모델(*.pt, *.ts)까지 지우는 일을 막는다."""
+    if not os.path.exists(path):
+        return
+    if not os.path.isdir(path):
+        raise SystemExit(f"--out이 폴더가 아닙니다: {path}")
+    other = sorted(set(os.listdir(path)) - set(expected))
+    if other:
+        raise SystemExit(f"{path}에 데이터셋이 아닌 항목이 있어 지우지 않습니다 ({', '.join(other[:5])}). "
+                         "빈 폴더나 새 경로를 --out으로 주세요")
+    shutil.rmtree(path)
+
+
+def require_timelines(matches):
+    """모든 회차·카메라에 시간별 캘리브레이션(track.py 결과)이 있는지, 기존 데이터셋을 지우기 전에 확인한다."""
+    for m, n in [(m, n) for m in matches for n in (1, 2)]:
+        if "segments" not in load(n, match_dir(m)):
+            raise SystemExit(f"{m} cam{n}: 시간별 캘리브레이션이 없습니다 (FUTSAL_MATCH={m} python track.py {n})")
+
+
 def main():
     p = argparse.ArgumentParser(description="코트 키포인트 데이터셋 생성")
     p.add_argument("--step", type=float, default=3.0, help="샘플 간격 (s)")
@@ -138,8 +145,8 @@ def main():
     a.matches = a.matches or list(splits["train"])
     for m in a.matches:
         check_purpose(m, "train", splits)
-    if os.path.exists(a.out):
-        shutil.rmtree(a.out)
+    require_timelines(a.matches)
+    clear_dataset_dir(a.out, ("images", "labels", "data.yaml"))
     for s in ("train", "val"):
         os.makedirs(os.path.join(a.out, "images", s))
         os.makedirs(os.path.join(a.out, "labels", s))
@@ -155,6 +162,7 @@ def main():
             raise SystemExit(f"{m} cam{n}: 시간별 캘리브레이션이 없습니다 (FUTSAL_MATCH={m} python track.py {n})")
         names = [k for k, _ in keypoints(spec)]
         source = Source(cal["video"])
+        size = (int(source.cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(source.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))  # 라벨 정규화용 실제 크기
         times = np.arange(a.step / 2, source.duration, a.step)
         if a.limit:
             times = times[np.linspace(0, len(times) - 1, a.limit).astype(int)]
@@ -164,13 +172,13 @@ def main():
             seg = usable_segment(cal, t)
             if seg is None:
                 continue
-            kp = project_keypoints(seg, cal["half"], n, spec, t=t, match=m)
+            kp = project_keypoints(seg, cal["half"], n, spec, size, t=t, match=m)
             if cal.get("mirror"):
-                _, kp = canonical(None, kp)
-            line = yolo_line(kp)
+                _, kp = canonical(None, kp, size)
+            line = yolo_line(kp, size)
             frame = source.frame_at(t) if line else None
             if frame is not None and cal.get("mirror"):
-                frame, _ = canonical(frame, kp)
+                frame, _ = canonical(frame, kp, size)
             if frame is None:
                 continue
             stem, s = f"{m}_cam{n}_{t:07.1f}", split_of(t)
