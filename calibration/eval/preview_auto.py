@@ -15,8 +15,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from auto_init import auto_calibrate, consensus, median_of  # noqa: E402
 from calib_core import Source, draw_lines, draw_overlay, out_path  # noqa: E402
 from court import spec_of  # noqa: E402
-from court_map import load  # noqa: E402
+from court_map import homographies_at, load  # noqa: E402
 from eval_auto import error_m, truth_segment  # noqa: E402
+from harness import log_eval  # noqa: E402
 
 
 def parse_times(args):
@@ -32,6 +33,7 @@ def parse_times(args):
 
 def main(args):
     n = int(args[args.index("--cam") + 1]) if "--cam" in args else 1
+    log_eval("preview_auto", [n])  # G4: 눈으로 확인만 한다, eval/usage_log.jsonl
     cal = load(n)
     spec = spec_of(cal)
     src = Source(cal["video"])
@@ -54,9 +56,10 @@ def main(args):
         if r["H_near"] is not None:
             view = draw_overlay(frame, np.array(r["H_near"]), np.array(r["H_far"]), cal["half"], spec)
         if seg is not None:
-            draw_lines(view, np.array(seg["H_near"]), lambda p: np.ones(len(p), bool), color=(0, 255, 0), thickness=1, spec=spec)
+            H_true = homographies_at(seg, t + 6)[0]  # 중앙값 창(t ~ t+12 s) 가운데의 정답, 느린 밀림(drift) 반영
+            draw_lines(view, H_true, lambda p: np.ones(len(p), bool), color=(0, 255, 0), thickness=1, spec=spec)
             if r["H_near"] is not None:
-                med, p95 = error_m(r["H_near"], seg["H_near"], cal["half"], spec)
+                med, p95 = error_m(r["H_near"], H_true, cal["half"], spec, frame.shape[1::-1])
                 err = f"err med {med:.2f} m, p95 {p95:.2f} m"
         text = f"cam{n} t={t:.0f}  {r['status']}  conf={r['confidence']:.2f}  {err}"
         cv2.rectangle(view, (0, 0), (1100, 44), (0, 0, 0), -1)

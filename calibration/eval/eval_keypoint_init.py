@@ -19,6 +19,7 @@ from auto_init import median_of  # noqa: E402
 from calib_core import HALF_SIGN, Source, front_facing  # noqa: E402
 from court import spec_of  # noqa: E402
 from court_map import homographies_at, load  # noqa: E402
+from harness import log_eval  # noqa: E402
 from keypoint_init import keypoint_calibrate, load_model  # noqa: E402
 from label_points import LABELS_PATH, read_labels  # noqa: E402
 from score_points import score, summarize  # noqa: E402
@@ -62,6 +63,7 @@ def as_cal(r, half, spec):
 
 def main(args):
     cams = [int(args[args.index("--cam") + 1])] if "--cam" in args else [1, 2]
+    log_eval("eval_keypoint_init", cams)  # G4: 결과만 본다 (설정을 고르지 않음), eval/usage_log.jsonl
     model = load_model()
     for n in cams:
         cal = load(n)
@@ -69,8 +71,8 @@ def main(args):
         src = Source(cal["video"])
         near_med, far_med, fails, val_near = [], [], 0, []
         for t in TIMES:
-            seg = resolved(cal, t) and resolved(cal, t + 12)
-            if seg is None:
+            seg = resolved(cal, t)  # median_of는 t ~ t+12 s 프레임: 창 전체가 한 구간일 때만 그 구간이 정답
+            if seg is None or resolved(cal, t + 12) is not seg:
                 continue
             frame = median_of(src, t)
             t0 = time.time()
