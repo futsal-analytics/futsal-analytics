@@ -182,6 +182,7 @@ python -m futsal.sim accuracy --hfov 67.3                              # 합성 
 
 ## 문서
 - [시스템 구조 (폰에서 모두 처리)](docs/architecture.md)
+- [앱 ↔ 분석 연결 (영상 규격, 서버로 결과 보내기, 검증 기록)](docs/app-connection.md)
 - [촬영 가이드 (설치 위치·각도·설정)](docs/capture-guide.md)
 - [추적 결과 영상 만들기 (한 번에 돌리기 옵션과 확인 방법)](docs/tracking-check.md)
 - [추적 v2: 방법, 결과, 알게 된 것 (10/8 실제 영상)](docs/tracking-v2.md)
